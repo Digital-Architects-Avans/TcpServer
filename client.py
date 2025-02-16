@@ -37,37 +37,49 @@ def send_file(server_host: str, server_port: int, file_path: str):
     file_name = os.path.basename(file_path)
     total_size = os.path.getsize(file_path)
 
+    # File size as a string representation
+    total_size_str = str(total_size)
+
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(60)  # Set a timeout for the connection
+            sock.settimeout(60)
             sock.connect((server_host, server_port))
 
-            # Send the UPLOAD command with the file name as the first line.
-            upload_command = f"UPLOAD {file_name}\n"
-            sock.sendall(upload_command.encode('utf-8'))
+            # Build the request header (HTTP-inspired)
+            #   - First line: UPLOAD
+            #   - Headers: File-Name and Content-Length
+            #   - Blank line indicating end of header.
+            request_lines = [
+                "UPLOAD",
+                f"File-Name: {file_name}",
+                f"Content-Length: {total_size_str}",
+                ""  # Blank line to separate headers from body
+            ]
+            # We append an extra \r\n after joining the header lines so that a proper blank line is sent immediately.
+            # since join() does not add a trailing delimiter after the last element.
+            request = "\r\n".join(request_lines) + "\r\n"
+            sock.sendall(request.encode('utf-8'))
 
-            # Send the file size as the second line.
-            sock.sendall((str(total_size) + "\n").encode('utf-8'))
-
-            # Wait for the server's response about resuming or starting fresh.
+            # Wait for the server's status response
             response = sock.recv(1024).decode('utf-8').strip()
             logging.info(f"Server response: {response}")
 
-            resume_offset = 0
-            if response.startswith("RESUME"):
+            # Parse response to check for resume offset
+            if response.startswith("Status: RESUME"):
                 try:
-                    resume_offset = int(response.split()[1])
+                    resume_offset = int(response.split()[2])
                     logging.info(f"Resuming transfer from byte {resume_offset}")
                 except (IndexError, ValueError):
-                    logging.error("Invalid resume response from server.")
+                    logging.error("Invalid resume response format.")
                     return
-            elif response == "START":
+            elif response.startswith("Status: 200"):
+                resume_offset = 0
                 logging.info("Starting new transfer")
             else:
-                logging.error(f"Unexpected response from server: {response}")
+                logging.error(f"Unexpected server response: {response}")
                 return
 
-            # Open the file and seek to the resume offset if needed.
+            # Open the file and send remaining data starting at resume_offset
             with open(file_path, 'rb') as file:
                 file.seek(resume_offset)
                 sent_bytes = resume_offset
@@ -90,33 +102,40 @@ def send_file(server_host: str, server_port: int, file_path: str):
 
 # DOWNLOAD
 def download_file(server_host: str, server_port: int, file_name: str):
+    # (Download implementation can be adjusted similarly to use a header format)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(60)
             sock.connect((server_host, server_port))
 
-            # Send the DOWNLOAD command to the server.
-            command = f"DOWNLOAD {file_name}\n"
-            sock.sendall(command.encode('utf-8'))
+            # Build a simple download request: DOWNLOAD header and blank line.
+            request_lines = [
+                "DOWNLOAD",
+                f"File-Name: {file_name}",
+                ""
+            ]
+            # We append an extra \r\n after joining the header lines so that a proper blank line is sent immediately.
+            # since join() does not add a trailing delimiter after the last element.
+            request = "\r\n".join(request_lines) + "\r\n"
+            sock.sendall(request.encode('utf-8'))
 
-            # Read the header response.
+            # Read the response header from the server
             header = sock.recv(1024).decode('utf-8').strip()
-            if header.startswith("ERROR"):
+            if header.startswith("Status: ERROR"):
                 logging.error(f"Server error: {header}")
                 return
-            if not header.startswith("FILESIZE"):
+            if not header.startswith("Content-Length:"):
                 logging.error(f"Unexpected header from server: {header}")
                 return
 
             try:
-                total_size = int(header.split()[1])
+                total_size = int(header.split(":", 1)[1].strip())
             except (IndexError, ValueError):
-                logging.error(f"Invalid FILESIZE header: {header}")
+                logging.error(f"Invalid Content-Length header: {header}")
                 return
 
             logging.info(f"Downloading '{file_name}' ({total_size} bytes) from the server.")
             received_bytes = 0
-            # Save the downloaded file in the current working directory.
             with open(file_name, 'wb') as f:
                 while received_bytes < total_size:
                     to_read = min(4096, total_size - received_bytes)
@@ -135,6 +154,7 @@ def download_file(server_host: str, server_port: int, file_name: str):
     except Exception as e:
         logging.error(f"Error downloading file: {e}")
 
+
 # LIST
 def list_files(server_host: str, server_port: int):
     try:
@@ -142,10 +162,10 @@ def list_files(server_host: str, server_port: int):
             sock.settimeout(60)
             sock.connect((server_host, server_port))
 
-            # Send the "LIST" command to the server.
-            sock.sendall("LIST\n".encode('utf-8'))
+            # LIST request
+            request = "LIST\r\n\r\n"
+            sock.sendall(request.encode('utf-8'))
 
-            # Receive the response.
             response = sock.recv(4096).decode('utf-8')
             if response:
                 print("Files on server:")

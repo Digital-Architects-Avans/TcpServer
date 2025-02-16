@@ -2,6 +2,7 @@ import socket
 import threading
 import logging
 import os
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -13,49 +14,100 @@ FILE_STORAGE_DIR = './uploads'
 if not os.path.exists(FILE_STORAGE_DIR):
     os.makedirs(FILE_STORAGE_DIR)
 
+def sanitize_filename(filename: str) -> str:
+    # Sanitize the filename by allowing only letters, digits, underscore, dash, and dot.
+    filename = os.path.basename(filename)
+    return re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
+
 
 def handle_client(conn: socket.socket, address: tuple):
-    conn.settimeout(60)  # Set a timeout of 60 seconds for the connection
+    conn.settimeout(60)
     logging.info(f"Connected by {address}")
     try:
-        # Wrap the connection with a file-like object for line-by-line reading.
         file_obj = conn.makefile('rb')
 
-        # Read the first line to determine the command.
-        first_line = file_obj.readline().decode('utf-8').strip()
-        if not first_line:
-            logging.error(f"Empty command from {address}")
+        # Read request line
+        request_line = file_obj.readline().decode('utf-8').strip()
+        if not request_line:
+            logging.error(f"Empty request from {address}")
             return
 
-        # Check if the command is LIST.
-        if first_line.upper() == "LIST":
-            files = [f for f in os.listdir(FILE_STORAGE_DIR)
-                     if os.path.isfile(os.path.join(FILE_STORAGE_DIR, f)) and not f.endswith('.part')]
-            response = "\n".join(files) + "\n"
-            conn.sendall(response.encode('utf-8'))
-            logging.info(f"Sent file list to {address}")
-            return
+        # Read headers until an empty line
+        headers = {}
+        while True:
+            line = file_obj.readline().decode('utf-8').strip()
+            logging.info(f"Read header line: '{line}'")
+            if line == "":
+                logging.info("End of headers reached.")
+                break
+            if ":" in line:
+                key, value = line.split(":", 1)
+                headers[key.strip()] = value.strip()
 
-        # Check if the command is DOWNLOAD.
-        if first_line.upper().startswith("DOWNLOAD"):
-            parts = first_line.split(maxsplit=1)
-            if len(parts) < 2:
-                error_msg = "ERROR Missing file name\n"
-                conn.sendall(error_msg.encode('utf-8'))
-                logging.error(f"Missing file name for download from {address}")
+        # Process the request based on the method in request_line
+        if request_line.upper() == "UPLOAD":
+            # Check required headers
+            if "File-Name" not in headers or "Content-Length" not in headers:
+                logging.error(f"Missing required headers from {address}")
+                return
+            file_name = sanitize_filename(headers["File-Name"])
+            try:
+                total_size = int(headers["Content-Length"])
+            except ValueError:
+                logging.error(f"Invalid Content-Length from {address}: {headers['Content-Length']}")
                 return
 
-            file_name = parts[1]
+            # Determine resume offset if a partial file exists
+            part_file = os.path.join(FILE_STORAGE_DIR, file_name + ".part")
+            if os.path.exists(part_file):
+                resume_offset = os.path.getsize(part_file)
+                status = f"Status: RESUME {resume_offset}\r\n"
+                logging.info(f"Partial file detected for '{file_name}', resume offset: {resume_offset} bytes")
+            else:
+                resume_offset = 0
+                status = "Status: 200 OK\r\n"
+                logging.info(f"Starting new transfer for '{file_name}' from {address}")
+
+            # Send status response to client
+            conn.sendall(status.encode('utf-8'))
+
+            # Receive file body starting from the resume offset
+            expected_bytes = total_size - resume_offset
+            with open(part_file, 'ab') as f:
+                received_bytes = 0
+                while received_bytes < expected_bytes:
+                    chunk = file_obj.read(min(4096, expected_bytes - received_bytes))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    received_bytes += len(chunk)
+
+            if resume_offset + received_bytes == total_size:
+                final_file = os.path.join(FILE_STORAGE_DIR, file_name)
+                os.rename(part_file, final_file)
+                logging.info(f"File '{file_name}' received successfully from {address}")
+            else:
+                logging.warning(
+                    f"Incomplete transfer from {address}: received {resume_offset + received_bytes} of {total_size} bytes")
+
+        elif request_line.upper() == "DOWNLOAD":
+            # Download functionality
+            if "File-Name" not in headers:
+                error_msg = "Status: ERROR Missing File-Name\r\n"
+                conn.sendall(error_msg.encode('utf-8'))
+                logging.error(f"Missing File-Name header for download from {address}")
+                return
+            file_name = sanitize_filename(headers["File-Name"])
             file_path = os.path.join(FILE_STORAGE_DIR, file_name)
             if not os.path.exists(file_path):
-                error_msg = "ERROR File not found\n"
+                error_msg = "Status: ERROR File not found\r\n"
                 conn.sendall(error_msg.encode('utf-8'))
                 logging.error(f"File '{file_name}' not found for download from {address}")
                 return
 
             total_size = os.path.getsize(file_path)
-            header = f"FILESIZE {total_size}\n"
-            conn.sendall(header.encode('utf-8'))
+            response_header = f"Content-Length: {total_size}\r\n\r\n"
+            conn.sendall(response_header.encode('utf-8'))
             logging.info(f"Sending file '{file_name}' ({total_size} bytes) to {address}")
 
             with open(file_path, 'rb') as f:
@@ -65,72 +117,16 @@ def handle_client(conn: socket.socket, address: tuple):
                         break
                     conn.sendall(chunk)
             logging.info(f"File '{file_name}' sent successfully to {address}")
-            return
 
-        # Check if the command is an UPLOAD command.
-        if first_line.upper().startswith("UPLOAD"):
-            # Extract the filename from the command.
-            parts = first_line.split(maxsplit=1)
-            if len(parts) < 2:
-                logging.error(f"UPLOAD command missing file name from {address}")
-                return
-            file_name = parts[1]
+        elif request_line.upper() == "LIST":
+            # List all files (excluding .part files)
+            files = [f for f in os.listdir(FILE_STORAGE_DIR)
+                     if os.path.isfile(os.path.join(FILE_STORAGE_DIR, f)) and not f.endswith('.part')]
+            response = "\n".join(files) + "\r\n"
+            conn.sendall(response.encode('utf-8'))
+            logging.info(f"Sent file list to {address}")
         else:
-            # If no explicit command is given, we may decide to reject the connection.
-            logging.error(f"Unknown command received: {first_line} from {address}")
-            return
-
-        # Now, handle the upload:
-        # Read the file size from the next line.
-        file_size_line = file_obj.readline().decode('utf-8').strip()
-        if not file_size_line:
-            logging.error(f"Missing file size from {address}")
-            return
-        try:
-            total_size = int(file_size_line)
-        except ValueError:
-            logging.error(f"Invalid file size from {address}: {file_size_line}")
-            return
-
-        part_file = os.path.join(FILE_STORAGE_DIR, file_name + ".part")
-        resume_offset = 0
-        if os.path.exists(part_file):
-            resume_offset = os.path.getsize(part_file)
-            logging.info(f"Partial file detected for '{file_name}', resume offset: {resume_offset} bytes")
-        else:
-            logging.info(f"No partial file found for '{file_name}'. Starting new transfer.")
-
-        # Inform the client whether to resume or start a new transfer.
-        response = f"RESUME {resume_offset}\n" if resume_offset > 0 else "START\n"
-        conn.sendall(response.encode('utf-8'))
-
-        remaining = total_size - resume_offset
-        if remaining < 0:
-            logging.error(f"Existing partial file size is larger than expected for '{file_name}' from {address}")
-            return
-
-        logging.info(f"Expecting {remaining} bytes from {address} for file '{file_name}'")
-        with open(part_file, 'ab') as f:
-            received_bytes = 0
-            while received_bytes < remaining:
-                to_read = min(4096, remaining - received_bytes)
-                try:
-                    chunk = file_obj.read(to_read)
-                except socket.timeout:
-                    logging.error(f"Socket timeout while receiving data from {address}")
-                    return
-                if not chunk:
-                    break
-                f.write(chunk)
-                received_bytes += len(chunk)
-
-        if resume_offset + received_bytes == total_size:
-            final_file = os.path.join(FILE_STORAGE_DIR, file_name)
-            os.rename(part_file, final_file)
-            logging.info(f"File '{file_name}' received successfully from {address}")
-        else:
-            logging.warning(
-                f"Incomplete transfer from {address}: received {resume_offset + received_bytes} of {total_size} bytes")
+            logging.error(f"Unknown request method {request_line} from {address}")
 
     except socket.timeout:
         logging.error(f"Connection timed out with {address}")

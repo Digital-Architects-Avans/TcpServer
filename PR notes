@@ -18,4 +18,4 @@ De server kan een client's ip en port onthouden en opnieuw een verzoek tot ack d
 Optie:
 - Save state door een csv of database gegevens weg te schrijven, welke file(id en naam), welke client(ip en poort/of account door authenticatie), welke size(chunk nummer of 120/256mb) is er geupload.
 - wanneer een upload verzoek binnenkomt checken we of er een record bestaat, zo ja hervatten we de upload(indien partial nog bestaat)
-
+- mogelijk met hashing kan het nog makkelijker - verder uit te zoeken waardig...

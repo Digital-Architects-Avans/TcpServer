@@ -1,25 +1,21 @@
-FE7. De server en clients moeten onderbrekingen in de verbinding kunnen detecteren en herstellen zonder corrupte of onvolledige bestanden achter te laten. (Timer inbouwen die .part bestanden 1x in de zoveel tijd opruimt)
+FE8. Foutafhandeling moet zorgen voor hervatting van bestandoverdracht bij verloren of beschadigde pakketten. (Uitzoeken of TCP dit zelfstandig doet of ingebouwd moet worden.)
+Deze eis komt voort uit de functionaliteit om bestanden groter dan 4gb te uploaden. Dit gebeurt vaak in chunks.
 
-De eis komt voort uit de behoefte om te voorkomen dat er gedeeltelijke of corrupte bestanden achterblijven wanneer een upload mislukt of abrupt wordt geannuleerd en later niet wordt hervat.
+In TCP zit standaard een vangnet ingebouwd bij weggevallen pakketjes of onderbrekingen in de verbinding.
+Dit gebeurd door de zogeheten Retransimission Timeout(RTO):
+- deze wacht voor een ack bij windows 300-500ms en bij mac/linux 1000ms
+- krijgt de partij geen ack terug binnen de bovengenoemde tijd dan stuurt deze het verzoek nogmaals met een verdubbeling van de tijd
+- OS afhankelijk gebeurd dit standaard 5 tot 15 keer per onderbreking, komt neer op minimaal 30 seconden de tijd om verbinding weer tot stand te brengen. Max 9 minuten.
+- (er is ook een RTT in RTO ingebouwd die dynamisch berekend of een time out langer of korter mag zijn op basis van eerdere round trip communicatie)
+- bij het verstrijken van de tijd van de laatste attempt wordt de verbinding afgebroken dmv een tcp time out (inzichtelijk via de socket time-out melding).
 
-Doormiddel van hashing zouden andere randzaken afgevangen moeten worden, er zal nog wel gekeken moeten worden hoe een upload hervat kan worden in combonatie met hashing.
+Wanneer een verbinding is verbroken en opnieuw hetzelfde bestand wordt geupload zal deze vanaf 0 beginnen. Afhankelijk van hoe het systeem werkt zal de bestaande partial worden vervangen door een nieuwe.
 
-Deze implementatie bereid het hervatten van upload voor, dit is een nog te implemneteren functionaliteit, als het dan al niet al ingebouwd zit in tcp.
+Nadat er een timeout heeft plaatsgevonden is het mogelijk opnieuw een verbinding/communicatie lijn te openen van client naar server, maar communicatie kan niet worden hervat op een al afgesloten verbinding.
+De server kan een client's ip en port onthouden en opnieuw een verzoek tot ack doen. Dan moet de client wel openstan voor binnenkomende verbindingen.
+(het meest voor de hand liggende is echter dat de server een save state maakt en wacht op interactie van de client)
 
-Een partial is pas geschikt voor verwijdering wanneer deze niet in gebruik is en wanneer deze niet meer is aangepast voor een bepaalde tijd.
+Optie:
+- Save state door een csv of database gegevens weg te schrijven, welke file(id en naam), welke client(ip en poort/of account door authenticatie), welke size(chunk nummer of 120/256mb) is er geupload.
+- wanneer een upload verzoek binnenkomt checken we of er een record bestaat, zo ja hervatten we de upload(indien partial nog bestaat)
 
-
-Toevoegingen
-- import time om in de zoveel tijd de zaak op te schonen
-- clean stale partial files functionaliteit om oude files te deleten
-- start stale files clean up, instantieren van clean stale partial files in een eigen thread(tijden runtime up houden om periodiek te kunnen checken)
-- aanroepen, van start stale files clean up, bij server opstart
-
-Aandachtspunten:
-- niet uitgebreid getest, simpele tests lijken te werken, zie eind
-- Voor een correcte werking mag .part geen geaccepteerde file extensie zijn voor een gefinaliseerde upload
-
-Mogelijke uitbreiding:
-- tijdelijke files buiten de gesyncte mappen bewaren.
-- Wanneer een tijdelijke file/upload compleet is van de tijdelijek map naar de productie/sync map verplaatsen.
-- Het scheiden van logica voor alle functionaliteit zou het makkelijker maken om verder te implementeren.

@@ -16,7 +16,7 @@ Toevoegingen
 - aanroepen, van start stale files clean up, bij server opstart
 
 Aandachtspunten:
-- niet uigebreid getest
+- niet uitgebreid getest, simpele tests lijken te werken, zie eind
 - Voor een correcte werking mag .part geen geaccepteerde file extensie zijn voor een gefinaliseerde upload
 
 Mogelijke uitbreiding:

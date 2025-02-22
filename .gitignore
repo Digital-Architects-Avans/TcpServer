@@ -1,0 +1,71 @@
+# macOS specific files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Icon must end with two \r
+Icon?
+
+# macOS generated Thumbs.db files
+._*
+
+# PyCharm specific files
+.idea/
+.idea/*
+*.iml
+
+# Python compiled files
+*.py[cod]
+__pycache__/
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Byte-compiled files
+*.so
+
+# Logs and debug info
+*.log
+
+# Unit test / coverage results
+.pytest_cache/
+*.cover
+*.coverage
+coverage.xml
+nosetests.xml
+*.test_result
+
+# Jupyter Notebook checkpoints (if used)
+.ipynb_checkpoints/
+
+# Temporary files
+*.swp
+*.swo
+*.tmp
+*.temp
+
+# Configuration or environment files
+.env
+.env.*
+*.bak
+
+# Build/Output folders
+build/
+dist/
+*.egg-info/
+
+# OS-specific cache files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Network-related temporary files
+*.pid
+
+# Ignore custom Python backups (if any)
+*.bak
+*.orig

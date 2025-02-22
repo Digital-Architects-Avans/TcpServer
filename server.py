@@ -1,6 +1,7 @@
 import socket
 import threading
 import logging
+import time
 import os
 import re
 
@@ -10,9 +11,41 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 # Directory where files are stored (best practice: separate from the root).
 FILE_STORAGE_DIR = './uploads'
 
+# Timeout for `.part` files in seconds (10 minutes)
+PARTIAL_FILE_TIMEOUT = 10 * 60
+
+
 # Ensure the storage directory exists.
 if not os.path.exists(FILE_STORAGE_DIR):
     os.makedirs(FILE_STORAGE_DIR)
+
+# Removes stale .part files that exceed the timeout.
+def clean_stale_partial_files():
+
+    while True:
+        current_time = time.time()
+
+        # Iterate over files in the upload directory
+        for filename in os.listdir(FILE_STORAGE_DIR):
+            if filename.endswith(".part"):
+                file_path = os.path.join(FILE_STORAGE_DIR, filename)
+
+                # Get the last modification time of the file
+                last_modified_time = os.path.getmtime(file_path)
+                # Check if the file is stale
+                if current_time - last_modified_time > PARTIAL_FILE_TIMEOUT:
+                    print(f"Deleting stale `.part` file: {file_path}")
+                    os.remove(file_path)
+
+        # Wait before the next cleanup check
+        time.sleep(PARTIAL_FILE_TIMEOUT)
+
+# Starts the cleanup thread to remove stale `.part` files.
+def start_stale_file_cleanup():
+    cleanup_thread = threading.Thread(target=clean_stale_partial_files, daemon=True)
+    cleanup_thread.start()
+
+
 
 def sanitize_filename(filename: str) -> str:
     # Sanitize the filename by allowing only letters, digits, underscore, dash, and dot.
@@ -59,6 +92,7 @@ def handle_client(conn: socket.socket, address: tuple):
 
             # Determine resume offset if a partial file exists
             part_file = os.path.join(FILE_STORAGE_DIR, file_name + ".part")
+
             if os.path.exists(part_file):
                 resume_offset = os.path.getsize(part_file)
                 status = f"Status: RESUME {resume_offset}\r\n"
@@ -81,7 +115,7 @@ def handle_client(conn: socket.socket, address: tuple):
                         break
                     f.write(chunk)
                     received_bytes += len(chunk)
-
+            # validation upload completion
             if resume_offset + received_bytes == total_size:
                 final_file = os.path.join(FILE_STORAGE_DIR, file_name)
                 os.rename(part_file, final_file)
@@ -137,7 +171,9 @@ def handle_client(conn: socket.socket, address: tuple):
         logging.info(f"Connection with {address} closed.")
 
 
+
 def start_server(host: str = '0.0.0.0', port: int = 12345):
+    start_stale_file_cleanup()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((host, port))

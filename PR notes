@@ -1,0 +1,6 @@
+FE7. De server en clients moeten onderbrekingen in de verbinding kunnen detecteren en herstellen zonder corrupte of onvolledige bestanden achter te laten. (Timer inbouwen die .part bestanden 1x in de zoveel tijd opruimt)
+
+De eis komt voort uit de behoefte om te voorkomen dat er gedeeltelijke of corrupte bestanden achterblijven wanneer een upload mislukt of abrupt wordt geannuleerd en later niet wordt hervat.
+
+Doormiddel van hashing zouden andere randzaken afgevangen moeten worden, er zal nog wel gekeken moeten worden hoe een upload hervat kan worden in combonatie met hashing.
+

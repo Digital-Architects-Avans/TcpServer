@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 
 # Directory where files are stored (best practice: separate from the root).
 FILE_STORAGE_DIR = './uploads'
- 
+
 # Ensure the storage directory exists.
 if not os.path.exists(FILE_STORAGE_DIR):
     os.makedirs(FILE_STORAGE_DIR)

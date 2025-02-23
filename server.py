@@ -10,9 +10,21 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 # Directory where files are stored (best practice: separate from the root).
 FILE_STORAGE_DIR = './uploads'
 
+#Global dictionaries for locks on files
+file_locks = {}
+# To prevent race conditions when multiple threads access or modify the file_locks dictionary
+file_locks_lock = threading.Lock()
+
 # Ensure the storage directory exists.
 if not os.path.exists(FILE_STORAGE_DIR):
     os.makedirs(FILE_STORAGE_DIR)
+
+# Checks if filename is in file_locks dictionary if not, adds  filename to the dictionary
+def get_file_lock(filename: str) -> threading.Lock:
+    with file_locks_lock:
+      if filename not in file_locks:
+        file_locks[filename] = threading.Lock()
+      return file_locks[filename]
 
 def sanitize_filename(filename: str) -> str:
     # Sanitize the filename by allowing only letters, digits, underscore, dash, and dot.
@@ -57,38 +69,47 @@ def handle_client(conn: socket.socket, address: tuple):
                 logging.error(f"Invalid Content-Length from {address}: {headers['Content-Length']}")
                 return
 
-            # Determine resume offset if a partial file exists
-            part_file = os.path.join(FILE_STORAGE_DIR, file_name + ".part")
-            if os.path.exists(part_file):
-                resume_offset = os.path.getsize(part_file)
-                status = f"Status: RESUME {resume_offset}\r\n"
-                logging.info(f"Partial file detected for '{file_name}', resume offset: {resume_offset} bytes")
-            else:
-                resume_offset = 0
-                status = "Status: 200 OK\r\n"
-                logging.info(f"Starting new transfer for '{file_name}' from {address}")
+            # Getting lock and locking file 
+            file_lock = get_file_lock(file_name)
+            logging.info(f"Retrieving lock for file: '{file_name}' from: {address}")
+            file_lock.acquire()
 
-            # Send status response to client
-            conn.sendall(status.encode('utf-8'))
+            try:
+                # Determine resume offset if a partial file exists
+                part_file = os.path.join(FILE_STORAGE_DIR, file_name + ".part")
+                if os.path.exists(part_file):
+                    resume_offset = os.path.getsize(part_file)
+                    status = f"Status: RESUME {resume_offset}\r\n"
+                    logging.info(f"Partial file detected for '{file_name}', resume offset: {resume_offset} bytes")
+                else:
+                    resume_offset = 0
+                    status = "Status: 200 OK\r\n"
+                    logging.info(f"Starting new transfer for '{file_name}' from {address}")
 
-            # Receive file body starting from the resume offset
-            expected_bytes = total_size - resume_offset
-            with open(part_file, 'ab') as f:
-                received_bytes = 0
-                while received_bytes < expected_bytes:
-                    chunk = file_obj.read(min(4096, expected_bytes - received_bytes))
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    received_bytes += len(chunk)
+                # Send status response to client
+                conn.sendall(status.encode('utf-8'))
 
-            if resume_offset + received_bytes == total_size:
-                final_file = os.path.join(FILE_STORAGE_DIR, file_name)
-                os.rename(part_file, final_file)
-                logging.info(f"File '{file_name}' received successfully from {address}")
-            else:
-                logging.warning(
-                    f"Incomplete transfer from {address}: received {resume_offset + received_bytes} of {total_size} bytes")
+                # Receive file body starting from the resume offset
+                expected_bytes = total_size - resume_offset
+                with open(part_file, 'ab') as f:
+                    received_bytes = 0
+                    while received_bytes < expected_bytes:
+                        chunk = file_obj.read(min(4096, expected_bytes - received_bytes))
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        received_bytes += len(chunk)
+
+                if resume_offset + received_bytes == total_size:
+                    final_file = os.path.join(FILE_STORAGE_DIR, file_name)
+                    os.rename(part_file, final_file)
+                    logging.info(f"File '{file_name}' received successfully from {address}")
+                else:
+                    logging.warning(
+                        f"Incomplete transfer from {address}: received {resume_offset + received_bytes} of {total_size} bytes")
+            finally:
+                file_lock.release()
+                logging.info(f"Releasing lock for file: '{file_name}' from {address}")
 
         elif request_line.upper() == "DOWNLOAD":
             # Download functionality

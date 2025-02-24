@@ -125,6 +125,14 @@ def handle_client(conn: socket.socket, address: tuple):
             response = "\n".join(files) + "\r\n"
             conn.sendall(response.encode('utf-8'))
             logging.info(f"Sent file list to {address}")
+
+        elif request_line.upper() == "PING":
+            message = (f"Pong! Connected to server.\n"
+                       f"Your IP and port: {address}\n"
+                       f"Server IP and port: {conn.getsockname()} \n")
+            logging.info(f"Have been pinged, will pong to {address}")
+            # Send pong message response to client
+            conn.sendall(message.encode('utf-8'))
         else:
             logging.error(f"Unknown request method {request_line} from {address}")
 

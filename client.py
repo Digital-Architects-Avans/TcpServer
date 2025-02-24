@@ -17,6 +17,7 @@ def print_help():
     help_text = f"""
 Available commands:
 /help                             - Show this help message.
+/ping                             - Send a ping request and shows current IP and ports.
 /upload <file_path>               - Upload a file to the server.
 /download <file_name>             - Download a file from the server.
 /list                             - List all files on the server.
@@ -179,6 +180,22 @@ def list_files(server_host: str, server_port: int):
         logging.error(f"Error listing files: {e}")
 
 
+def ping(server_host: str, server_port: int):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect((server_host, server_port))
+            # Send a simple PING request
+            request = "PING\r\n\r\n"
+            sock.sendall(request.encode('utf-8'))
+            response = sock.recv(4096).decode('utf-8').strip()
+            print(f"Server response: {response}")
+    except socket.timeout:
+        logging.error("Ping request timed out.")
+    except Exception as e:
+        logging.error(f"Error during ping: {e}")
+
+
 def main():
     global SERVER_HOST, SERVER_PORT
 
@@ -197,6 +214,15 @@ def main():
 
         if user_input.startswith("/help"):
             print_help()
+        # Handle '/ping' command
+        elif user_input.startswith("/ping"):
+            try:
+                ping(SERVER_HOST, SERVER_PORT)
+            except Exception as e:
+                logging.error(f"Ping command failed: {e}")
+            continue
+
+
         elif user_input.startswith("/upload"):
             parts = user_input.split(maxsplit=1)
             if len(parts) < 2:

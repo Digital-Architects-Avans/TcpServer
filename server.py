@@ -21,10 +21,10 @@ if not os.path.exists(FILE_STORAGE_DIR):
 
 # Removes stale .part files that exceed the timeout.
 def clean_stale_partial_files():
-
-    while True:
-        current_time = time.time()
-
+    # wait for check_time to have passed +1 second and initiate cleanup
+    time.sleep(PARTIAL_FILE_TIMEOUT+1)
+    current_time = time.time()
+    try:
         # Iterate over files in the upload directory
         for filename in os.listdir(FILE_STORAGE_DIR):
             if filename.endswith(".part"):
@@ -36,15 +36,19 @@ def clean_stale_partial_files():
                 if current_time - last_modified_time > PARTIAL_FILE_TIMEOUT:
                     print(f"Deleting stale `.part` file: {file_path}")
                     os.remove(file_path)
+    except(FileNotFoundError, PermissionError) as e:
+        print(f"Error occurred while deleting stale files: {e}")
 
-        # Wait before the next cleanup check
-        time.sleep(PARTIAL_FILE_TIMEOUT)
 
 # Starts the cleanup thread to remove stale `.part` files.
 def start_stale_file_cleanup():
-    cleanup_thread = threading.Thread(target=clean_stale_partial_files, daemon=True)
-    cleanup_thread.start()
-
+    # Check if there are any `.part` files in the directory
+    if any(filename.endswith(".part") for filename in os.listdir(FILE_STORAGE_DIR)):
+        logging.info("Starting stale file cleanup thread.")
+        cleanup_thread = threading.Thread(target=clean_stale_partial_files, daemon=True)
+        cleanup_thread.start()
+    else:
+        logging.info("No `.part` files found. Cleanup thread not started.")
 
 
 def sanitize_filename(filename: str) -> str:

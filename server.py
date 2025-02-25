@@ -1,157 +1,305 @@
-import socket
-import threading
-import logging
-import os
+import asyncio
+import hashlib
 import re
+import time
+import websockets
+import json
+import os
+import logging
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Directory where files are stored (best practice: separate from the root).
-FILE_STORAGE_DIR = './uploads'
+# Directory where files are stored
+FILE_STORAGE_DIR = "./uploads"
+os.makedirs(FILE_STORAGE_DIR, exist_ok=True)
 
-# Ensure the storage directory exists.
-if not os.path.exists(FILE_STORAGE_DIR):
-    os.makedirs(FILE_STORAGE_DIR)
+# Common temporary file prefixes & extensions to ignore
+IGNORED_PREFIXES = ("~$", ".")
+IGNORED_SUFFIXES = (".swp", ".tmp", ".lock", ".part")
+
+# Set to keep track of connected clients
+connected_clients = set()
+
+
+async def websocket_handler(websocket: websockets.ServerConnection) -> None:
+    """Handles WebSocket connections and processes commands and event messages."""
+    connected_clients.add(websocket)
+    try:
+        async for message in websocket:
+            data = json.loads(message)
+
+            if data.get("event"):  # Handle client file changes
+                await handle_client_notification(data, websocket)
+                continue
+
+            command = data.get("command")
+            filename = data.get("filename", "")
+
+            if command == "UPLOAD":
+                await receive_file(websocket, filename)
+            elif command == "DOWNLOAD":
+                await send_file(websocket, filename)
+            elif command == "LIST":
+                await list_files(websocket)
+            elif command == "DELETE":
+                await delete_file(websocket, filename)
+
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    finally:
+        connected_clients.remove(websocket)
+
+
+async def handle_client_notification(data, websocket):
+    """
+    Processes a notification message sent from a client.
+    Checks both timestamps and file sizes to determine if an upload is needed.
+    """
+
+    event_type = data.get("event")
+    filename = data.get("filename")
+    client_timestamp = data.get("timestamp")
+    client_file_size = int(data.get("size", 0))  # Include file size in client notifications
+    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+
+    # Ignore temporary files
+    if filename.startswith("~$"):
+        logging.info(f"Ignoring temporary file: {filename}")
+        return
+
+    logging.info(
+        f"Received client notification: File '{filename}' {event_type} at {client_timestamp} with size {client_file_size} bytes")
+
+    if event_type in ["created", "modified"]:
+        await asyncio.sleep(1)  # Give time for saving before checking
+
+        server_timestamp = int(os.path.getmtime(file_path)) if os.path.exists(file_path) else 0
+        server_file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+        logging.info(f"Client timestamp: {client_timestamp} ({time.ctime(client_timestamp)}), size: {client_file_size}")
+        logging.info(f"Server timestamp: {server_timestamp} ({time.ctime(server_timestamp)}), size: {server_file_size}")
+
+        # Ignore empty files from clients
+        if client_file_size == 0:
+            logging.info(f"Ignoring file '{filename}' because its size is 0 bytes.")
+            return
+
+        # Upload file if the client's version is newer OR the file size is different
+        if client_timestamp > server_timestamp or client_file_size != server_file_size:
+            request = json.dumps({"command": "REQUEST_UPLOAD", "filename": filename})
+            await websocket.send(request)
+            logging.info(f"Requested upload for file '{filename}' from client.")
+        else:
+            logging.info(f"No upload needed for '{filename}': server version is up-to-date.")
+
+    elif event_type == "deleted":
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logging.info(f"File '{filename}' deleted on server as per client notification.")
+            await notify_clients("deleted", filename)
+        else:
+            logging.info(f"File '{filename}' already absent on server.")
+
+
+async def notify_clients(event_type, filename):
+    """Sends a notification to all connected clients, including the file's last modified timestamp."""
+    if not connected_clients:
+        logging.warning(f"[NOTIFY] No connected clients to notify about '{filename}' {event_type}.")
+        return  # Exit early if there are no clients
+
+    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+    timestamp = int(os.path.getmtime(file_path)) if os.path.exists(file_path) else int(time.time())
+    file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+
+    message = json.dumps({
+        "event": event_type,
+        "filename": filename,
+        "timestamp": timestamp,
+        "size": file_size
+    })
+
+    logging.info(
+        f"[NOTIFYING {len(connected_clients)} CLIENTS] File '{filename}' {event_type} at {timestamp} (size: {file_size} bytes)")
+    await asyncio.gather(*(client.send(message) for client in connected_clients))
+
+
+def should_ignore(filename):
+    """Checks if the file should be ignored based on its name."""
+    return filename.startswith(IGNORED_PREFIXES) or filename.endswith(IGNORED_SUFFIXES)
+
+
+class AsyncSyncEventHandler(FileSystemEventHandler):
+    """
+    Monitors file system changes and debounces events before notifying clients.
+    If multiple events for the same file occur within a short interval, only the last event is processed.
+    """
+    def __init__(self, loop: asyncio.AbstractEventLoop, debounce_interval: float = 0.3):
+        super().__init__()
+        self.loop = loop
+        self.debounce_interval = debounce_interval
+        self.debounce_interval = debounce_interval
+        self.debounce_tasks: dict[str, asyncio.Task] = {}
+        self.latest_events: dict[str, str] = {}
+
+    def enqueue_event(self, event_type: str, filename: str) -> None:
+        if should_ignore(filename):
+            return
+        logging.info(f"[WATCHDOG] File {event_type}: {filename}")
+        # Update the latest event for this file.
+        self.latest_events[filename] = event_type
+
+        # Cancel any previously scheduled task for this file.
+        if filename in self.debounce_tasks:
+            self.debounce_tasks[filename].cancel()
+
+        # Schedule a new task that waits for the debounce interval before notifying.
+        self.debounce_tasks[filename] = self.loop.create_task(self._debounced_notify(filename))
+
+    async def _debounced_notify(self, filename: str) -> None:
+        try:
+            await asyncio.sleep(self.debounce_interval)
+            event_type = self.latest_events.get(filename)
+            # Clean up the stored event and task.
+            self.latest_events.pop(filename, None)
+            self.debounce_tasks.pop(filename, None)
+            await notify_clients(event_type, filename)
+        except asyncio.CancelledError:
+            # Task was cancelled because a new event arrived for the same file.
+            pass
+        except Exception as e:
+            logging.error(f"Error in debounced notify for '{filename}': {e}", exc_info=True)
+
+    def on_created(self, event: FileSystemEvent) -> None:
+        if not event.is_directory:
+            self.enqueue_event("created", os.path.basename(event.src_path))
+
+    def on_modified(self, event: FileSystemEvent) -> None:
+        if not event.is_directory:
+            self.enqueue_event("modified", os.path.basename(event.src_path))
+
+    def on_deleted(self, event: FileSystemEvent) -> None:
+        if not event.is_directory:
+            self.enqueue_event("deleted", os.path.basename(event.src_path))
+
+    def on_moved(self, event: FileSystemEvent) -> None:
+        if not event.is_directory:
+            # Treat a move as a deletion of the source file and creation of the destination file.
+            self.enqueue_event("deleted", os.path.basename(event.src_path))
+            self.enqueue_event("created", os.path.basename(event.dest_path))
+
+
+def compute_hash(file_path):
+    hasher = hashlib.sha256()
+    try:
+        with open(file_path, 'rb') as f:
+            while chunk := f.read(4096):
+                hasher.update(chunk)
+    except Exception as e:
+        logging.error(f"Error computing hash for {file_path}: {e}")
+        return None
+    return hasher.hexdigest()
+
 
 def sanitize_filename(filename: str) -> str:
-    # Sanitize the filename by allowing only letters, digits, underscore, dash, and dot.
     filename = os.path.basename(filename)
     return re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
 
 
-def handle_client(conn: socket.socket, address: tuple):
-    conn.settimeout(60)
-    logging.info(f"Connected by {address}")
+async def receive_file(websocket, filename):
+    """Receives a file from the client and saves it on the server."""
+    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+    logging.info(f"Receiving file: {filename}")
+
     try:
-        file_obj = conn.makefile('rb')
+        with open(file_path, "wb") as f:
+            while True:
+                chunk = await websocket.recv()
+                if chunk == "EOF":
+                    break
+                f.write(chunk)
 
-        # Read request line
-        request_line = file_obj.readline().decode('utf-8').strip()
-        if not request_line:
-            logging.error(f"Empty request from {address}")
-            return
-
-        # Read headers until an empty line
-        headers = {}
-        while True:
-            line = file_obj.readline().decode('utf-8').strip()
-            logging.info(f"Read header line: '{line}'")
-            if line == "":
-                logging.info("End of headers reached.")
-                break
-            if ":" in line:
-                key, value = line.split(":", 1)
-                headers[key.strip()] = value.strip()
-
-        # Process the request based on the method in request_line
-        if request_line.upper() == "UPLOAD":
-            # Check required headers
-            if "File-Name" not in headers or "Content-Length" not in headers:
-                logging.error(f"Missing required headers from {address}")
-                return
-            file_name = sanitize_filename(headers["File-Name"])
-            try:
-                total_size = int(headers["Content-Length"])
-            except ValueError:
-                logging.error(f"Invalid Content-Length from {address}: {headers['Content-Length']}")
-                return
-
-            # Determine resume offset if a partial file exists
-            part_file = os.path.join(FILE_STORAGE_DIR, file_name + ".part")
-            if os.path.exists(part_file):
-                resume_offset = os.path.getsize(part_file)
-                status = f"Status: RESUME {resume_offset}\r\n"
-                logging.info(f"Partial file detected for '{file_name}', resume offset: {resume_offset} bytes")
-            else:
-                resume_offset = 0
-                status = "Status: 200 OK\r\n"
-                logging.info(f"Starting new transfer for '{file_name}' from {address}")
-
-            # Send status response to client
-            conn.sendall(status.encode('utf-8'))
-
-            # Receive file body starting from the resume offset
-            expected_bytes = total_size - resume_offset
-            with open(part_file, 'ab') as f:
-                received_bytes = 0
-                while received_bytes < expected_bytes:
-                    chunk = file_obj.read(min(4096, expected_bytes - received_bytes))
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    received_bytes += len(chunk)
-
-            if resume_offset + received_bytes == total_size:
-                final_file = os.path.join(FILE_STORAGE_DIR, file_name)
-                os.rename(part_file, final_file)
-                logging.info(f"File '{file_name}' received successfully from {address}")
-            else:
-                logging.warning(
-                    f"Incomplete transfer from {address}: received {resume_offset + received_bytes} of {total_size} bytes")
-
-        elif request_line.upper() == "DOWNLOAD":
-            # Download functionality
-            if "File-Name" not in headers:
-                error_msg = "Status: ERROR Missing File-Name\r\n"
-                conn.sendall(error_msg.encode('utf-8'))
-                logging.error(f"Missing File-Name header for download from {address}")
-                return
-            file_name = sanitize_filename(headers["File-Name"])
-            file_path = os.path.join(FILE_STORAGE_DIR, file_name)
-            if not os.path.exists(file_path):
-                error_msg = "Status: ERROR File not found\r\n"
-                conn.sendall(error_msg.encode('utf-8'))
-                logging.error(f"File '{file_name}' not found for download from {address}")
-                return
-
-            total_size = os.path.getsize(file_path)
-            response_header = f"Content-Length: {total_size}\r\n\r\n"
-            conn.sendall(response_header.encode('utf-8'))
-            logging.info(f"Sending file '{file_name}' ({total_size} bytes) to {address}")
-
-            with open(file_path, 'rb') as f:
-                while True:
-                    chunk = f.read(4096)
-                    if not chunk:
-                        break
-                    conn.sendall(chunk)
-            logging.info(f"File '{file_name}' sent successfully to {address}")
-
-        elif request_line.upper() == "LIST":
-            # List all files (excluding .part files)
-            files = [f for f in os.listdir(FILE_STORAGE_DIR)
-                     if os.path.isfile(os.path.join(FILE_STORAGE_DIR, f)) and not f.endswith('.part')]
-            response = "\n".join(files) + "\r\n"
-            conn.sendall(response.encode('utf-8'))
-            logging.info(f"Sent file list to {address}")
-        else:
-            logging.error(f"Unknown request method {request_line} from {address}")
-
-    except socket.timeout:
-        logging.error(f"Connection timed out with {address}")
+        logging.info(f"File {filename} uploaded successfully!")
+        await notify_clients("created", filename)
+        await websocket.send(json.dumps({"status": "OK", "message": f"File {filename} uploaded"}))
     except Exception as e:
-        logging.error(f"Error handling client {address}: {e}")
+        logging.error(f"Error receiving file {filename}: {e}")
+        await websocket.send(json.dumps({"status": "ERROR", "message": "File upload failed"}))
+
+
+async def send_file(websocket, filename):
+    """Sends a requested file to the client."""
+    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+    if not os.path.exists(file_path):
+        await websocket.send(json.dumps({"status": "ERROR", "message": "File not found"}))
+        return
+
+    logging.info(f"Sending file: {filename}")
+    try:
+        with open(file_path, "rb") as f:
+            while chunk := f.read(4096):
+                await websocket.send(chunk)
+        await websocket.send("EOF")
+        logging.info(f"File {filename} sent successfully!")
+    except Exception as e:
+        logging.error(f"Error sending file {filename}: {e}")
+        await websocket.send(json.dumps({"status": "ERROR", "message": "File transfer failed"}))
+
+
+async def delete_file(websocket, filename):
+    """Deletes a file on the server and notifies clients."""
+    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        logging.info(f"File '{filename}' deleted as per request.")
+
+        # Notify all clients about the deletion
+        await notify_clients("deleted", filename)
+
+        await websocket.send(json.dumps({"status": "OK", "message": f"File '{filename}' deleted"}))
+    else:
+        logging.warning(f"File '{filename}' not found for deletion.")
+        await websocket.send(json.dumps({"status": "ERROR", "message": "File not found"}))
+
+
+async def list_files(websocket):
+    """Sends a list of available files to the client."""
+    files = [f for f in os.listdir(FILE_STORAGE_DIR) if os.path.isfile(os.path.join(FILE_STORAGE_DIR, f))]
+    await websocket.send(json.dumps({"files": files}))
+    logging.info("Sent file list to client.")
+
+
+async def start_websocket_server():
+    """Starts the WebSocket server."""
+    async with websockets.serve(websocket_handler, "0.0.0.0", 5678):
+        logging.info("WebSocket server started on ws://0.0.0.0:5678")
+        await asyncio.Future()  # Keeps the server running
+
+
+def start_watchdog_observer(loop):
+    """Starts a file system observer to track file changes."""
+    event_handler = AsyncSyncEventHandler(loop, debounce_interval=0.3)
+    observer = Observer()
+    observer.schedule(event_handler, FILE_STORAGE_DIR, recursive=True)
+    observer.start()
+    logging.info(f"[WATCHDOG] File sync observer started, watching: {FILE_STORAGE_DIR}")
+    return observer
+
+
+if __name__ == "__main__":
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Start the watchdog observer using our debounced event handler.
+    observer = start_watchdog_observer(loop)
+
+    async def main():
+        await start_websocket_server()
+
+    try:
+        loop.run_until_complete(main())
     finally:
-        conn.close()
-        logging.info(f"Connection with {address} closed.")
-
-
-def start_server(host: str = '0.0.0.0', port: int = 12345):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind((host, port))
-        server_sock.listen()
-        logging.info(f"Server listening on {host}:{port}")
-
-        while True:
-            try:
-                conn, address = server_sock.accept()
-                thread = threading.Thread(target=handle_client, args=(conn, address), daemon=True)
-                thread.start()
-            except Exception as e:
-                logging.error(f"Error accepting a new connection: {e}")
-
-
-if __name__ == '__main__':
-    start_server()
+        observer.stop()
+        observer.join()

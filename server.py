@@ -3,6 +3,8 @@ import threading
 import logging
 import os
 import re
+import unicodedata
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -14,10 +16,26 @@ FILE_STORAGE_DIR = './uploads'
 if not os.path.exists(FILE_STORAGE_DIR):
     os.makedirs(FILE_STORAGE_DIR)
 
-def sanitize_filename(filename: str) -> str:
-    # Sanitize the filename by allowing only letters, digits, underscore, dash, and dot.
-    filename = os.path.basename(filename)
-    return re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
+def sanitize_filename(filename: str, max_length: int = 200, target_charset: str = "UTF-8") -> str:
+    filename = unicodedata.normalize("NFC", filename)
+    filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', "", filename)
+
+    # Restrict to ASCII printable characters if UTF-8 is not supported
+    if target_charset.upper() == "ASCII":
+        filename = filename.encode("ascii", "ignore").decode()
+
+    # Deny the filename if it exceeds the maximum length
+    if len(filename.encode(target_charset)) > max_length:
+        raise ValueError(f"Filename exceeds the maximum length of {max_length} characters.")
+
+    # Strip leading/trailing spaces or dots (common restrictions on Windows).
+    filename = filename.strip(" .")
+
+    # Fallback for empty filenames after sanitization.
+    if not filename:
+        raise ValueError("Filename became empty after sanitization.")
+
+    return filename
 
 
 def handle_client(conn: socket.socket, address: tuple):

@@ -46,6 +46,14 @@ async def websocket_handler(websocket: websockets.ServerConnection) -> None:
                 await list_files(websocket)
             elif command == "DELETE":
                 await delete_file(websocket, filename)
+            elif message.strip().lower() == "PING":
+                # Respond with the predefined message
+                await websocket.send("PONG")
+
+            else:
+                # Handle other message types if needed
+                await websocket.send(f"Unknown command: {message}")
+
 
     except websockets.exceptions.ConnectionClosed:
         pass

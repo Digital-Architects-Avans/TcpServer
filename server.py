@@ -20,6 +20,9 @@ os.makedirs(FILE_STORAGE_DIR, exist_ok=True)
 IGNORED_PREFIXES = ("~$", ".")
 IGNORED_SUFFIXES = (".swp", ".tmp", ".lock", ".part")
 
+# Directory to store file specific locks
+file_locks = {}
+
 # Set to keep track of connected clients
 connected_clients = set()
 
@@ -112,7 +115,6 @@ async def notify_clients(event_type, filename):
     file_path = os.path.join(FILE_STORAGE_DIR, filename)
     timestamp = int(os.path.getmtime(file_path)) if os.path.exists(file_path) else int(time.time())
     file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-
     message = json.dumps({
         "event": event_type,
         "filename": filename,
@@ -209,42 +211,48 @@ def sanitize_filename(filename: str) -> str:
 
 async def receive_file(websocket, filename):
     """Receives a file from the client and saves it on the server."""
-    file_path = os.path.join(FILE_STORAGE_DIR, filename)
-    logging.info(f"Receiving file: {filename}")
+    file_lock = await get_file_lock(filename)
 
-    try:
-        with open(file_path, "wb") as f:
-            while True:
-                chunk = await websocket.recv()
-                if chunk == "EOF":
-                    break
-                f.write(chunk)
+    async with file_lock:  # Lock the file to prevent race conditions
+        file_path = os.path.join(FILE_STORAGE_DIR, filename)
+        logging.info(f"Receiving file: {filename}")
 
-        logging.info(f"File {filename} uploaded successfully!")
-        await notify_clients("created", filename)
-        await websocket.send(json.dumps({"status": "OK", "message": f"File {filename} uploaded"}))
-    except Exception as e:
-        logging.error(f"Error receiving file {filename}: {e}")
-        await websocket.send(json.dumps({"status": "ERROR", "message": "File upload failed"}))
+        try:
+            with open(file_path, "wb") as f:
+                while True:
+                    chunk = await websocket.recv()
+                    if chunk == "EOF":
+                        break
+                    f.write(chunk)
+
+            logging.info(f"File {filename} uploaded successfully!")
+            await notify_clients("created", filename)
+            await websocket.send(json.dumps({"status": "OK", "message": f"File {filename} uploaded"}))
+        except Exception as e:
+            logging.error(f"Error receiving file {filename}: {e}")
+            await websocket.send(json.dumps({"status": "ERROR", "message": "File upload failed"}))
 
 
 async def send_file(websocket, filename):
     """Sends a requested file to the client."""
-    file_path = os.path.join(FILE_STORAGE_DIR, filename)
-    if not os.path.exists(file_path):
-        await websocket.send(json.dumps({"status": "ERROR", "message": "File not found"}))
-        return
+    file_lock = await get_file_lock(filename)
 
-    logging.info(f"Sending file: {filename}")
-    try:
-        with open(file_path, "rb") as f:
-            while chunk := f.read(4096):
-                await websocket.send(chunk)
-        await websocket.send("EOF")
-        logging.info(f"File {filename} sent successfully!")
-    except Exception as e:
-        logging.error(f"Error sending file {filename}: {e}")
-        await websocket.send(json.dumps({"status": "ERROR", "message": "File transfer failed"}))
+    async with file_lock:  # Ensure no upload is in progress before reading
+        file_path = os.path.join(FILE_STORAGE_DIR, filename)
+        if not os.path.exists(file_path):
+            await websocket.send(json.dumps({"status": "ERROR", "message": "File not found"}))
+            return
+
+        logging.info(f"Sending file: {filename}")
+        try:
+            with open(file_path, "rb") as f:
+                while chunk := f.read(4096):
+                    await websocket.send(chunk)
+            await websocket.send("EOF")
+            logging.info(f"File {filename} sent successfully!")
+        except Exception as e:
+            logging.error(f"Error sending file {filename}: {e}")
+            await websocket.send(json.dumps({"status": "ERROR", "message": "File transfer failed"}))
 
 
 async def delete_file(websocket, filename):
@@ -270,6 +278,11 @@ async def list_files(websocket):
     await websocket.send(json.dumps({"files": files}))
     logging.info("Sent file list to client.")
 
+async def get_file_lock(filename):
+    """Ensure each file has its own asyncio.Lock instance."""
+    if filename not in file_locks:
+        file_locks[filename] = asyncio.Lock()
+    return file_locks[filename]
 
 async def start_websocket_server():
     """Starts the WebSocket server."""

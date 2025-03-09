@@ -14,11 +14,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Directory where files are stored
 FILE_STORAGE_DIR = "./uploads"
+PARTIAL_SUFFIX = ".partial"
 os.makedirs(FILE_STORAGE_DIR, exist_ok=True)
 
 # Common temporary file prefixes & extensions to ignore
 IGNORED_PREFIXES = ("~$", ".")
-IGNORED_SUFFIXES = (".swp", ".tmp", ".lock", ".part", ".crdownload", ".download", ".bak", ".old", ".temp", ".sha256")
+IGNORED_SUFFIXES = (".swp", ".tmp", ".lock", ".part", ".partial", ".crdownload", ".download", ".bak", ".old", ".temp", ".sha256")
 
 # Set to keep track of connected clients
 connected_clients = set()
@@ -206,11 +207,13 @@ async def notify_clients(event_type, filename):
 
 async def receive_file(websocket, filename):
     """Receives a file from the client, saves it, and caches its SHA256 hash."""
+    temp_filename = filename + PARTIAL_SUFFIX
+    temp_file_path = os.path.join(FILE_STORAGE_DIR, temp_filename)
     file_path = os.path.join(FILE_STORAGE_DIR, filename)
     logging.info(f"Receiving file: {filename}")
 
     try:
-        with open(file_path, "wb") as f:
+        with open(temp_file_path, "wb") as f:
             while True:
                 chunk = await websocket.recv()
                 if chunk == "EOF":
@@ -218,6 +221,12 @@ async def receive_file(websocket, filename):
                 f.write(chunk)
 
         # After file upload, compute and cache the hash.
+        try:
+            os.rename(temp_file_path, file_path)
+            logging.info(f"File converted '{temp_filename}' to '{filename}'")
+        except Exception as e:
+            logging.error(f"Error converting '{temp_filename}' to '{filename}': {e}")
+
         new_hash = compute_hash(file_path)
         if new_hash:
             try:

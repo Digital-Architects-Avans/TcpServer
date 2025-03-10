@@ -69,3 +69,5 @@ Desktop.ini
 # Ignore custom Python backups (if any)
 *.bak
 *.orig
+/.vs
+/uploads

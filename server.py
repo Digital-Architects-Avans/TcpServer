@@ -6,9 +6,16 @@ import websockets
 import json
 import threading
 import os
+import ssl
 import logging
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Secure certificate paths
+SSL_CERT = os.path.join(BASE_DIR, ".certs", "cert.pem")
+SSL_KEY = os.path.join(BASE_DIR, ".certs", "key.pem")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -323,6 +330,9 @@ async def list_files(websocket):
     await websocket.send(json.dumps({"files": files}))
     logging.info("Sent file list to client.")
 
+# Configure SSL context
+ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ssl_context.load_cert_chain(SSL_CERT, SSL_KEY)
 
 # ----------------------- Watchdog and Server Setup -----------------------
 
@@ -386,8 +396,8 @@ def should_ignore(filename):
 
 async def start_websocket_server():
     """Starts the WebSocket server."""
-    async with websockets.serve(websocket_handler, "0.0.0.0", 5678):
-        logging.info("WebSocket server started on ws://0.0.0.0:5678")
+    async with websockets.serve(websocket_handler, "0.0.0.0", 5678, ssl=ssl_context):
+        logging.info("WebSocket server started on wss://0.0.0.0:5678")
         await asyncio.Future()  # Keeps the server running
 
 

@@ -10,9 +10,11 @@ import logging
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Secure certificate paths
-SSL_CERT = "C:/certs/cert.pem"
-SSL_KEY = "C:/certs/key.pem"
+SSL_CERT = os.path.join(BASE_DIR, ".certs", "cert.pem")
+SSL_KEY = os.path.join(BASE_DIR, ".certs", "key.pem")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

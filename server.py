@@ -4,6 +4,7 @@ import re
 import time
 import websockets
 import json
+import threading
 import os
 import logging
 from watchdog.observers import Observer
@@ -14,14 +15,47 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # Directory where files are stored
 FILE_STORAGE_DIR = "./uploads"
+# .partial extension used during upload transaction
+PARTIAL_SUFFIX = ".partial"
+# Timeout for `.part` files in seconds (10 minutes)
+PARTIAL_FILE_TIMEOUT = 10 * 60
+
 os.makedirs(FILE_STORAGE_DIR, exist_ok=True)
 
 # Common temporary file prefixes & extensions to ignore
 IGNORED_PREFIXES = ("~$", ".")
-IGNORED_SUFFIXES = (".swp", ".tmp", ".lock", ".part", ".crdownload", ".download", ".bak", ".old", ".temp", ".sha256")
+IGNORED_SUFFIXES = (".swp", ".tmp", ".lock", ".part", ".partial", ".crdownload", ".download", ".bak", ".old", ".temp", ".sha256")
 
 # Set to keep track of connected clients
 connected_clients = set()
+
+# _______________________ FE7 ____________________________
+# Waits async for the defined timeout to remove any stale .part files.
+def clean_stale_partial_files():
+    # wait for the timeout period plus one extra second
+    time.sleep(PARTIAL_FILE_TIMEOUT + 1)
+    current_time = time.time()
+    try:
+        # Go through each file in the directory
+        for filename in os.listdir(FILE_STORAGE_DIR):
+            if filename.endswith(PARTIAL_SUFFIX):
+                file_path = os.path.join(FILE_STORAGE_DIR, filename)
+                last_modified_time = os.path.getmtime(file_path)
+                if current_time - last_modified_time > PARTIAL_FILE_TIMEOUT:
+                    logging.info(f"Deleting stale {PARTIAL_SUFFIX} file: {file_path}")
+                    os.remove(file_path)
+    except (FileNotFoundError, PermissionError) as e:
+        logging.error(f"No '.partial' files detected during cleanup, closing thread: {e}")
+
+# Starts a cleanup thread if any .part file exists.
+def start_stale_file_cleanup():
+    if any(filename.endswith(PARTIAL_SUFFIX) for filename in os.listdir(FILE_STORAGE_DIR)):
+        logging.info("Starting stale file cleanup thread.")
+        cleanup_thread = threading.Thread(target=clean_stale_partial_files, daemon=True)
+        cleanup_thread.start()
+    else:
+        logging.info("No .part files found. Cleanup thread not started.")
+
 
 
 # ----------------------- Helper Methods -----------------------
@@ -206,11 +240,13 @@ async def notify_clients(event_type, filename):
 
 async def receive_file(websocket, filename):
     """Receives a file from the client, saves it, and caches its SHA256 hash."""
+    temp_filename = filename + PARTIAL_SUFFIX
+    temp_file_path = os.path.join(FILE_STORAGE_DIR, temp_filename)
     file_path = os.path.join(FILE_STORAGE_DIR, filename)
     logging.info(f"Receiving file: {filename}")
 
     try:
-        with open(file_path, "wb") as f:
+        with open(temp_file_path, "wb") as f:
             while True:
                 chunk = await websocket.recv()
                 if chunk == "EOF":
@@ -218,6 +254,12 @@ async def receive_file(websocket, filename):
                 f.write(chunk)
 
         # After file upload, compute and cache the hash.
+        try:
+            os.rename(temp_file_path, file_path)
+            logging.info(f"File converted '{temp_filename}' to '{filename}'")
+        except Exception as e:
+            logging.error(f"Error converting '{temp_filename}' to '{filename}': {e}")
+
         new_hash = compute_hash(file_path)
         if new_hash:
             try:
@@ -233,6 +275,9 @@ async def receive_file(websocket, filename):
     except Exception as e:
         logging.error(f"Error receiving file {filename}: {e}")
         await websocket.send(json.dumps({"status": "ERROR", "message": "File upload failed"}))
+    finally:
+        # Check if cleanup of .partial files is needed
+        start_stale_file_cleanup()
 
 
 async def send_file(websocket, filename):
@@ -360,6 +405,7 @@ if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     observer = start_watchdog_observer(loop)
+    start_stale_file_cleanup()
 
 
     async def main():

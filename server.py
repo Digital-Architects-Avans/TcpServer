@@ -396,8 +396,8 @@ def should_ignore(filename):
 
 async def start_websocket_server():
     """Starts the WebSocket server."""
-    async with websockets.serve(websocket_handler, "0.0.0.0", 5678, ssl=ssl_context):
-        logging.info("WebSocket server started on wss://0.0.0.0:5678")
+    async with websockets.serve(websocket_handler, "0.0.0.0", 433, ssl=ssl_context):
+        logging.info("WebSocket server started on wss://0.0.0.0:433")
         await asyncio.Future()  # Keeps the server running
 
 

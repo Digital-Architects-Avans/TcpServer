@@ -3,7 +3,7 @@ name: Deploy WebSocket Server
 on:
   push:
     branches:
-      - main  # only run when pushing to main branch
+      - master  # only run when pushing to master branch
 
 jobs:
   build-and-push:

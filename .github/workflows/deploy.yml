@@ -29,22 +29,3 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: avdv116/my-websocket-server:latest
-
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: SSH into remote server and deploy container
-        uses: appleboy/ssh-action@v0.1.7
-        with:
-          host: ${{ secrets.REMOTE_HOST }}
-          username: ${{ secrets.REMOTE_USER }}
-          password: ${{ secrets.REMOTE_PASSWORD }}
-          proxy_host: "185.212.60.63"
-          proxy_port: "80"
-          script: |
-            sudo docker stop my-websocket-server || true
-            sudo docker rm my-websocket-server || true
-            sudo docker pull avdv116/my-websocket-server:latest
-            sudo docker run -d -p 433:433 --name my-websocket-server avdv116/my-websocket-server:latest

@@ -13,8 +13,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the entire project into the container, including .certs and other directories
 COPY . .
 
-# Expose port 433 for secure WebSocket connections
-EXPOSE 433
+# Expose port 443 for secure WebSocket connections
+EXPOSE 443
 
 # Run the server from the project root
 CMD ["python", "server.py"]

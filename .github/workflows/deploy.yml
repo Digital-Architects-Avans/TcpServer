@@ -41,6 +41,8 @@ jobs:
           host: ${{ secrets.REMOTE_HOST }}
           username: ${{ secrets.REMOTE_USER }}
           password: ${{ secrets.REMOTE_PASSWORD }}
+          proxy_host: "185.212.60.63"
+          proxy_port: "80"
           script: |
             sudo docker stop my-websocket-server || true
             sudo docker rm my-websocket-server || true

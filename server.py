@@ -199,7 +199,7 @@ async def handle_client_notification(data, websocket):
             if client_hash:
                 server_hash = get_cached_hash(file_path) if os.path.exists(file_path) else None
                 if server_hash and server_hash == client_hash:
-                    logging.info(f"File '{filename}' hash matches; no upload required.")
+                    logging.info(f"File '{filename}' hash matches; no upload required.")       
                     return  # No upload needed because content is the same
                 else:
                     logging.info(f"Hash mismatch (client: {client_hash}, server: {server_hash}).")
@@ -252,6 +252,41 @@ async def receive_file(websocket, filename):
     file_path = os.path.join(FILE_STORAGE_DIR, filename)
     logging.info(f"Receiving file: {filename}")
 
+        # Check if the file was modified in the last 60 seconds
+    if os.path.exists(file_path):
+        last_modified_time = os.path.getmtime(file_path)
+        time_since_last_update = time.time() - last_modified_time
+
+        if time_since_last_update < 60:
+            logging.info(f"File '{filename}' was modified {int(time_since_last_update)} seconds ago.")
+            # Ask the client if they want to override
+            await websocket.send(json.dumps({
+                "status": "WARNING",
+                "message": f"File '{filename}' was recently updated. Do you want to overwrite it? (Y/N)"
+            }))
+            # Wait for client response
+            confirmation = await websocket.recv()
+            if confirmation.strip().upper() != "Y":
+                logging.info(f"Upload for '{filename}' canceled by client.")
+                await websocket.send(json.dumps({
+                    "status": "CANCELLED",
+                    "message": f"Upload for '{filename}' was canceled."
+                }))
+                return
+        else:
+            # If file is older than 60 seconds send a response so the client can continue
+            await websocket.send(json.dumps({
+                "status": "PROCEED",
+                "message": f"File '{filename}' is older than 60 seconds. Proceed with upload."
+            }))
+
+    else:
+        # If file does not exist also send a PROCEED response
+        await websocket.send(json.dumps({
+            "status": "PROCEED",
+            "message": f"File '{filename}' does not exist on server. Proceed with upload."
+        }))
+
     try:
         with open(temp_file_path, "wb") as f:
             while True:
@@ -275,6 +310,9 @@ async def receive_file(websocket, filename):
                 logging.info(f"Cached SHA256 hash for '{filename}'.")
             except Exception as e:
                 logging.error(f"Error caching hash for {filename}: {e}")
+
+        now = time.time() # Update file's modification time to now.
+        os.utime(file_path, (now, now))
 
         logging.info(f"File {filename} uploaded successfully!")
         await notify_clients("created", filename)

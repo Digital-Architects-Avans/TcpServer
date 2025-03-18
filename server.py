@@ -156,17 +156,17 @@ async def websocket_handler(websocket: websockets.ServerConnection) -> None:
 
 
 async def handle_client_notification(data, websocket):
-    # (Implementation remains largely unchanged.)
     event_type = data.get("event")
     filename = data.get("filename")
+
+    if filename and should_ignore(filename):
+        logging.info(f"Ignoring file notification for '{filename}' because it matches ignored patterns.")
+        return
+
     client_timestamp = data.get("timestamp")
     client_file_size = int(data.get("size", 0))
     client_hash = data.get("hash")
     file_path = os.path.join(FILE_STORAGE_DIR, filename)
-
-    if filename.startswith("~$"):
-        logging.info(f"Ignoring temporary file: {filename}")
-        return
 
     logging.info(
         f"Received client notification: File '{filename}' {event_type} at {client_timestamp} with size {client_file_size} bytes")
@@ -226,6 +226,10 @@ async def handle_client_notification(data, websocket):
 async def notify_clients(event_type, filename):
     if not persistent_clients:
         logging.warning(f"No persistent clients to notify about '{filename}' {event_type}.")
+        return
+
+    if filename and should_ignore(filename):
+        logging.info(f"Ignoring file notification for '{filename}' because it matches ignored patterns.")
         return
 
     file_path = os.path.normpath(os.path.join(FILE_STORAGE_DIR, filename))
@@ -340,8 +344,15 @@ async def list_files(websocket):
     logging.info("Sent file list to client.")
 
 
-def should_ignore(filename):
-    return filename.startswith(IGNORED_PREFIXES) or filename.endswith(IGNORED_SUFFIXES)
+def should_ignore(path):
+    file_name = os.path.basename(path)
+    # Check for ignored prefixes and suffixes.
+    if file_name.startswith(IGNORED_PREFIXES) or file_name.endswith(IGNORED_SUFFIXES):
+        return True
+    # If the file name has no extension, assume it's a directory.
+    if not os.path.splitext(file_name)[1]:
+        return True
+    return False
 
 
 # ----------------------- Watchdog Setup -----------------------
@@ -353,6 +364,7 @@ class AsyncSyncEventHandler(FileSystemEventHandler):
         self.debounce_interval = debounce_interval
         self.debounce_tasks = {}
         self.latest_events = {}
+
 
     def enqueue_event(self, event_type: str, file_path: str) -> None:
         if should_ignore(file_path):
@@ -386,8 +398,6 @@ class AsyncSyncEventHandler(FileSystemEventHandler):
         self.enqueue_event("deleted", event.src_path)
 
     def on_moved(self, event: FileSystemEvent) -> None:
-        old_relative = os.path.relpath(event.src_path, FILE_STORAGE_DIR)
-        new_relative = os.path.relpath(event.dest_path, FILE_STORAGE_DIR)
         self.enqueue_event("deleted", event.src_path)
         self.enqueue_event("created", event.dest_path)
 

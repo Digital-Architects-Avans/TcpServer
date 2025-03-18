@@ -46,7 +46,7 @@ def clean_stale_partial_files():
         # Go through each file in the directory
         for filename in os.listdir(FILE_STORAGE_DIR):
             if filename.endswith(PARTIAL_SUFFIX):
-                file_path = os.path.join(FILE_STORAGE_DIR, filename)
+                file_path = os.path.normpath(os.path.join(FILE_STORAGE_DIR, filename))
                 last_modified_time = os.path.getmtime(file_path)
                 if current_time - last_modified_time > PARTIAL_FILE_TIMEOUT:
                     logging.info(f"Deleting stale {PARTIAL_SUFFIX} file: {file_path}")
@@ -232,7 +232,7 @@ async def notify_clients(event_type, filename):
 
     message = json.dumps({
         "event": event_type,
-        "filename": filename,
+        "filename": os.path.relpath(file_path, FILE_STORAGE_DIR),
         "timestamp": timestamp,
         "size": file_size
     })
@@ -249,7 +249,9 @@ async def receive_file(websocket, filename):
     """Receives a file from the client, saves it, and caches its SHA256 hash."""
     temp_filename = filename + PARTIAL_SUFFIX
     temp_file_path = os.path.join(FILE_STORAGE_DIR, temp_filename)
-    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+    file_path = os.path.normpath(os.path.join(FILE_STORAGE_DIR, filename))
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
     logging.info(f"Receiving file: {filename}")
 
     try:

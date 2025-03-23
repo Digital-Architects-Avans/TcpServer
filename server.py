@@ -257,19 +257,22 @@ async def send_file(websocket, filename):
 
 async def delete_file(websocket, filename):
     """Deletes a file on the server and notifies clients."""
-    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+    file_lock = await get_file_lock(filename)
 
-    if os.path.exists(file_path):
-        os.remove(file_path)
-        logging.info(f"File '{filename}' deleted as per request.")
+    async with file_lock:  # Ensure no upload is in progress before reading
+        file_path = os.path.join(FILE_STORAGE_DIR, filename)
 
-        # Notify all clients about the deletion
-        await notify_clients("deleted", filename)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logging.info(f"File '{filename}' deleted as per request.")
 
-        await websocket.send(json.dumps({"status": "OK", "message": f"File '{filename}' deleted"}))
-    else:
-        logging.warning(f"File '{filename}' not found for deletion.")
-        await websocket.send(json.dumps({"status": "ERROR", "message": "File not found"}))
+            # Notify all clients about the deletion
+            await notify_clients("deleted", filename)
+
+            await websocket.send(json.dumps({"status": "OK", "message": f"File '{filename}' deleted"}))
+        else:
+            logging.warning(f"File '{filename}' not found for deletion.")
+            await websocket.send(json.dumps({"status": "ERROR", "message": "File not found"}))
 
 
 async def list_files(websocket):

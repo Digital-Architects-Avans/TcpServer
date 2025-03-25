@@ -24,45 +24,43 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 FILE_STORAGE_DIR = "./uploads"
 # .partial extension used during upload transaction
 PARTIAL_SUFFIX = ".partial"
-# Timeout for `.part` files in seconds (10 minutes)
+# Timeout for `.partial` files in seconds (10 minutes)
 PARTIAL_FILE_TIMEOUT = 10 * 60
 
 os.makedirs(FILE_STORAGE_DIR, exist_ok=True)
 
-# Common temporary file prefixes & extensions to ignore
+# File ignore settings
 IGNORED_PREFIXES = ("~$", ".")
-IGNORED_SUFFIXES = (".swp", ".tmp", ".lock", ".part", ".partial", ".crdownload", ".download", ".bak", ".old", ".temp", ".sha256")
+IGNORED_SUFFIXES = (".swp", ".tmp", ".lock", ".part", ".partial", ".crdownload", ".download", ".bak", ".old", ".temp",
+                    ".sha256")
 
-# Set to keep track of connected clients
-connected_clients = set()
+# Set for persistent notification connections only
+persistent_clients = set()
 
-# _______________________ FE7 ____________________________
-# Waits async for the defined timeout to remove any stale .part files.
+
+# _______________________ Stale Partial Files Cleanup ____________________________
 def clean_stale_partial_files():
-    # wait for the timeout period plus one extra second
     time.sleep(PARTIAL_FILE_TIMEOUT + 1)
     current_time = time.time()
     try:
-        # Go through each file in the directory
         for filename in os.listdir(FILE_STORAGE_DIR):
             if filename.endswith(PARTIAL_SUFFIX):
-                file_path = os.path.join(FILE_STORAGE_DIR, filename)
+                file_path = os.path.normpath(os.path.join(FILE_STORAGE_DIR, filename))
                 last_modified_time = os.path.getmtime(file_path)
                 if current_time - last_modified_time > PARTIAL_FILE_TIMEOUT:
                     logging.info(f"Deleting stale {PARTIAL_SUFFIX} file: {file_path}")
                     os.remove(file_path)
     except (FileNotFoundError, PermissionError) as e:
-        logging.error(f"No '.partial' files detected during cleanup, closing thread: {e}")
+        logging.error(f"Error during stale file cleanup: {e}")
 
-# Starts a cleanup thread if any .part file exists.
+
 def start_stale_file_cleanup():
     if any(filename.endswith(PARTIAL_SUFFIX) for filename in os.listdir(FILE_STORAGE_DIR)):
         logging.info("Starting stale file cleanup thread.")
         cleanup_thread = threading.Thread(target=clean_stale_partial_files, daemon=True)
         cleanup_thread.start()
     else:
-        logging.info("No .part files found. Cleanup thread not started.")
-
+        logging.info("No .partial files found. Cleanup thread not started.")
 
 
 # ----------------------- Helper Methods -----------------------
@@ -84,24 +82,14 @@ def get_hash_file_path(file_path):
 
 
 def get_cached_hash(file_path):
-    """
-    Returns the cached SHA256 hash from the .sha256 file if available and up-to-date.
-    If not, computes the hash, saves it, and returns the new value.
-    """
     hash_file = get_hash_file_path(file_path)
-
-    # Check if the .sha256 file exists and is up-to-date.
     if os.path.exists(hash_file):
-        # We can store the file modification time inside the .sha256 file if needed.
-        #  we assume that if the .sha256 exists, it is valid.
         try:
             with open(hash_file, "r") as hf:
                 cached = hf.read().strip()
             return cached
         except Exception as e:
             logging.error(f"Error reading cached hash for {file_path}: {e}")
-
-    # If no valid cache exists, compute and store the hash.
     new_hash = compute_hash(file_path)
     if new_hash:
         try:
@@ -114,7 +102,6 @@ def get_cached_hash(file_path):
 
 
 def invalidate_cached_hash(file_path):
-    """Removes the cached hash file if it exists."""
     hash_file = get_hash_file_path(file_path)
     if os.path.exists(hash_file):
         try:
@@ -132,19 +119,24 @@ def sanitize_filename(filename: str) -> str:
 # ----------------------- WebSocket Handlers -----------------------
 
 async def websocket_handler(websocket: websockets.ServerConnection) -> None:
-    """Handles WebSocket connections and processes commands and event messages."""
-    connected_clients.add(websocket)
+    """
+    Handles connections. If the first message is a subscription, the connection is added to persistent_clients.
+    Otherwise, the connection is treated as a transient file-transfer connection.
+    """
+    persistent = False
     try:
         async for message in websocket:
             data = json.loads(message)
+            # If this is a subscription message, mark as persistent and add to the set.
+            if not persistent and data.get("subscribe") is True:
+                persistent = True
+                persistent_clients.add(websocket)
+                logging.info(f"Added {websocket.remote_address} as persistent notification connection.")
+                continue  # Do not process further messages on subscription.
 
-            if data.get("event"):  # Handle client file changes
-                await handle_client_notification(data, websocket)
-                continue
-
+            # Process file transfer commands:
             command = data.get("command")
             filename = data.get("filename", "")
-
             if command == "UPLOAD":
                 await receive_file(websocket, filename)
             elif command == "DOWNLOAD":
@@ -153,105 +145,128 @@ async def websocket_handler(websocket: websockets.ServerConnection) -> None:
                 await list_files(websocket)
             elif command == "DELETE":
                 await delete_file(websocket, filename)
-
+            elif data.get("event") is not None:
+                await handle_client_notification(data, websocket)
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
-        connected_clients.remove(websocket)
+        if persistent:
+            persistent_clients.discard(websocket)
+            logging.info(f"Removed {websocket.remote_address} persistent notification connection.")
 
 
 async def handle_client_notification(data, websocket):
-    """
-    Processes a notification message sent from a client.
-    Checks timestamps, file sizes, and uses the cached SHA256 hash for comparison.
-    """
     event_type = data.get("event")
     filename = data.get("filename")
-    client_timestamp = data.get("timestamp")
-    client_file_size = int(data.get("size", 0))
-    client_hash = data.get("hash")  # Client-provided hash
-    file_path = os.path.join(FILE_STORAGE_DIR, filename)
 
-    # Ignore temporary files
-    if filename.startswith("~$"):
-        logging.info(f"Ignoring temporary file: {filename}")
+    if filename and should_ignore(filename):
+        logging.info(f"Ignoring file notification for '{filename}' because it matches ignored patterns.")
         return
 
+    client_timestamp = data.get("timestamp")
+    client_file_size = int(data.get("size", 0))
+    client_hash = data.get("hash")
+    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+
     logging.info(
-        f"Received client notification: File '{filename}' {event_type} at {client_timestamp} with size {client_file_size} bytes"
-    )
+        f"Received client notification: File '{filename}' {event_type} at {client_timestamp} with size {client_file_size} bytes")
 
     if event_type in ["created", "modified"]:
-        await asyncio.sleep(1)  # Give time for saving before checking
+        if os.path.exists(file_path) and os.path.isdir(file_path):
+            logging.info(f"'{filename}' is a directory. Skipping upload request.")
+            return
+
+        await asyncio.sleep(1)
 
         server_timestamp = int(os.path.getmtime(file_path)) if os.path.exists(file_path) else 0
         server_file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
         logging.info(f"Client timestamp: {client_timestamp} ({time.ctime(client_timestamp)}), size: {client_file_size}")
         logging.info(f"Server timestamp: {server_timestamp} ({time.ctime(server_timestamp)}), size: {server_file_size}")
 
-        # Ignore empty files from clients
-        if client_file_size == 0:
-            logging.info(f"Ignoring file '{filename}' because its size is 0 bytes.")
-            return
-
-        # If metadata indicates a change, use the cached hash to verify file contents
         if client_timestamp > server_timestamp or client_file_size != server_file_size:
             if client_hash:
                 server_hash = get_cached_hash(file_path) if os.path.exists(file_path) else None
                 if server_hash and server_hash == client_hash:
                     logging.info(f"File '{filename}' hash matches; no upload required.")
-                    return  # No upload needed because content is the same
+                    return
                 else:
                     logging.info(f"Hash mismatch (client: {client_hash}, server: {server_hash}).")
-            # Request upload if no hash provided or if hashes differ
             request = json.dumps({"command": "REQUEST_UPLOAD", "filename": filename})
             await websocket.send(request)
             logging.info(f"Requested upload for file '{filename}' from client.")
         else:
-            logging.info(f"No upload needed for '{filename}': server version is up-to-date.")
-
+            logging.info(f"No upload needed for '{filename}'.")
     elif event_type == "deleted":
         if os.path.exists(file_path):
-            os.remove(file_path)
-            invalidate_cached_hash(file_path)
-            logging.info(f"File '{filename}' deleted on server as per client notification.")
+            if os.path.isdir(file_path):
+                logging.info(f"Directory '{filename}' deleted. Removing contents.")
+                for root, _, files in os.walk(file_path, topdown=False):
+                    for f in files:
+                        os.remove(os.path.join(root, f))
+                        invalidate_cached_hash(os.path.join(root, f))
+                for root, dirs, _ in os.walk(file_path, topdown=False):
+                    for d in dirs:
+                        try:
+                            os.rmdir(os.path.join(root, d))
+                        except OSError:
+                            logging.warning(f"Could not delete non-empty directory: {d}")
+                try:
+                    os.rmdir(file_path)
+                except OSError:
+                    logging.warning(f"Could not delete directory: {file_path}")
+            else:
+                os.remove(file_path)
+                invalidate_cached_hash(file_path)
+                logging.info(f"File '{filename}' deleted on server.")
             await notify_clients("deleted", filename)
         else:
-            logging.info(f"File '{filename}' already absent on server.")
+            logging.info(f"File '{filename}' already absent.")
 
 
 async def notify_clients(event_type, filename):
-    """Sends a notification to all connected clients, including the file's last modified timestamp."""
-    if not connected_clients:
-        logging.warning(f"[NOTIFY] No connected clients to notify about '{filename}' {event_type}.")
+    if not persistent_clients:
+        logging.warning(f"No persistent clients to notify about '{filename}' {event_type}.")
         return
 
-    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+    if filename and should_ignore(filename):
+        logging.info(f"Ignoring file notification for '{filename}' because it matches ignored patterns.")
+        return
+
+    file_path = os.path.normpath(os.path.join(FILE_STORAGE_DIR, filename))
+    relative_filename = os.path.relpath(file_path, FILE_STORAGE_DIR)
     timestamp = int(os.path.getmtime(file_path)) if os.path.exists(file_path) else int(time.time())
     file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
 
     message = json.dumps({
         "event": event_type,
-        "filename": filename,
+        "filename": relative_filename,
         "timestamp": timestamp,
         "size": file_size
     })
 
     logging.info(
-        f"[NOTIFYING {len(connected_clients)} CLIENTS] File '{filename}' {event_type} at {timestamp} (size: {file_size} bytes)"
-    )
-    await asyncio.gather(*(client.send(message) for client in connected_clients))
+        f"[NOTIFYING {len(persistent_clients)} CLIENTS] File '{relative_filename}' {event_type} at {timestamp} (size: {file_size} bytes)")
+    for client in list(persistent_clients):
+        try:
+            await client.send(message)
+        except websockets.exceptions.ConnectionClosed as e:
+            logging.info(f"Client connection closed, removing client: {e}")
+            persistent_clients.discard(client)
+        except Exception as e:
+            logging.error(f"Error sending notification: {e}", exc_info=True)
 
 
 # ----------------------- File Reception and Transfer -----------------------
 
 async def receive_file(websocket, filename):
-    """Receives a file from the client, saves it, and caches its SHA256 hash."""
+    file_path = os.path.normpath(os.path.join(FILE_STORAGE_DIR, filename))
+    file_directory = os.path.dirname(file_path)
+    if not os.path.exists(file_directory):
+        os.makedirs(file_directory, exist_ok=True)
+
     temp_filename = filename + PARTIAL_SUFFIX
     temp_file_path = os.path.join(FILE_STORAGE_DIR, temp_filename)
-    file_path = os.path.join(FILE_STORAGE_DIR, filename)
-    logging.info(f"Receiving file: {filename}")
-
+    logging.info(f"Receiving file: {filename} -> {file_path}")
     try:
         with open(temp_file_path, "wb") as f:
             while True:
@@ -259,41 +274,29 @@ async def receive_file(websocket, filename):
                 if chunk == "EOF":
                     break
                 f.write(chunk)
-
-        # After file upload, compute and cache the hash.
-        try:
-            os.rename(temp_file_path, file_path)
-            logging.info(f"File converted '{temp_filename}' to '{filename}'")
-        except Exception as e:
-            logging.error(f"Error converting '{temp_filename}' to '{filename}': {e}")
-
+        os.rename(temp_file_path, file_path)
+        logging.info(f"Converted '{temp_filename}' to '{filename}'")
         new_hash = compute_hash(file_path)
         if new_hash:
-            try:
-                with open(get_hash_file_path(file_path), "w") as hf:
-                    hf.write(new_hash)
-                logging.info(f"Cached SHA256 hash for '{filename}'.")
-            except Exception as e:
-                logging.error(f"Error caching hash for {filename}: {e}")
-
+            with open(get_hash_file_path(file_path), "w") as hf:
+                hf.write(new_hash)
+            logging.info(f"Cached SHA256 hash for '{filename}'.")
         logging.info(f"File {filename} uploaded successfully!")
+        await asyncio.sleep(5)
         await notify_clients("created", filename)
         await websocket.send(json.dumps({"status": "OK", "message": f"File {filename} uploaded"}))
     except Exception as e:
         logging.error(f"Error receiving file {filename}: {e}")
-        await websocket.send(json.dumps({"status": "ERROR", "message": "File upload failed"}))
+        await websocket.send(json.dumps({"status": "ERROR", "message": "Upload failed"}))
     finally:
-        # Check if cleanup of .partial files is needed
         start_stale_file_cleanup()
 
 
 async def send_file(websocket, filename):
-    """Sends a requested file to the client."""
-    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+    file_path = os.path.normpath(os.path.join(FILE_STORAGE_DIR, filename))
     if not os.path.exists(file_path):
         await websocket.send(json.dumps({"status": "ERROR", "message": "File not found"}))
         return
-
     logging.info(f"Sending file: {filename}")
     try:
         with open(file_path, "rb") as f:
@@ -303,113 +306,119 @@ async def send_file(websocket, filename):
         logging.info(f"File {filename} sent successfully!")
     except Exception as e:
         logging.error(f"Error sending file {filename}: {e}")
-        await websocket.send(json.dumps({"status": "ERROR", "message": "File transfer failed"}))
+        await websocket.send(json.dumps({"status": "ERROR", "message": "Transfer failed"}))
 
 
 async def delete_file(websocket, filename):
-    """Deletes a file on the server and notifies clients."""
-    file_path = os.path.join(FILE_STORAGE_DIR, filename)
-
+    file_path = os.path.normpath(os.path.join(FILE_STORAGE_DIR, filename))
     if os.path.exists(file_path):
-        os.remove(file_path)
-        invalidate_cached_hash(file_path)
-        logging.info(f"File '{filename}' deleted as per request.")
-        await notify_clients("deleted", filename)
-        await websocket.send(json.dumps({"status": "OK", "message": f"File '{filename}' deleted"}))
+        try:
+            os.remove(file_path)
+            invalidate_cached_hash(file_path)
+            logging.info(f"File '{filename}' deleted.")
+            await notify_clients("deleted", filename)
+            await websocket.send(json.dumps({"status": "OK", "message": f"Deleted {filename}"}))
+            dir_path = os.path.dirname(file_path)
+            while dir_path != FILE_STORAGE_DIR and not os.listdir(dir_path):
+                os.rmdir(dir_path)
+                logging.info(f"Removed empty directory: {dir_path}")
+                dir_path = os.path.dirname(dir_path)
+        except Exception as e:
+            logging.error(f"Error deleting file {filename}: {e}")
+            await websocket.send(json.dumps({"status": "ERROR", "message": "Deletion failed"}))
     else:
         logging.warning(f"File '{filename}' not found for deletion.")
         await websocket.send(json.dumps({"status": "ERROR", "message": "File not found"}))
 
 
 async def list_files(websocket):
-    """Sends a list of available files to the client, ignoring unwanted files."""
-    files = [
-        f for f in os.listdir(FILE_STORAGE_DIR)
-        if os.path.isfile(os.path.join(FILE_STORAGE_DIR, f)) and not should_ignore(f)
-    ]
+    files = []
+    for root, _, filenames in os.walk(FILE_STORAGE_DIR):
+        for filename in filenames:
+            file_path = os.path.normpath(os.path.join(root, filename))
+            relative_path = os.path.relpath(file_path, FILE_STORAGE_DIR)
+            if not should_ignore(relative_path):
+                files.append(relative_path)
+    files.sort()
     await websocket.send(json.dumps({"files": files}))
     logging.info("Sent file list to client.")
 
-# Configure SSL context
-ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-ssl_context.load_cert_chain(SSL_CERT, SSL_KEY)
 
-# ----------------------- Watchdog and Server Setup -----------------------
+def should_ignore(path):
+    file_name = os.path.basename(path)
+    # Check for ignored prefixes and suffixes.
+    if file_name.startswith(IGNORED_PREFIXES) or file_name.endswith(IGNORED_SUFFIXES):
+        return True
+    # If the file name has no extension, assume it's a directory.
+    if not os.path.splitext(file_name)[1]:
+        return True
+    return False
+
+
+# ----------------------- Watchdog Setup -----------------------
 
 class AsyncSyncEventHandler(FileSystemEventHandler):
-    """
-    Monitors file system changes and debounces events before notifying clients.
-    If multiple events for the same file occur within a short interval, only the last event is processed.
-    """
-
     def __init__(self, loop: asyncio.AbstractEventLoop, debounce_interval: float = 0.3):
         super().__init__()
         self.loop = loop
         self.debounce_interval = debounce_interval
-        self.debounce_tasks: dict[str, asyncio.Task] = {}
-        self.latest_events: dict[str, str] = {}
+        self.debounce_tasks = {}
+        self.latest_events = {}
 
-    def enqueue_event(self, event_type: str, filename: str) -> None:
-        if should_ignore(filename):
+
+    def enqueue_event(self, event_type: str, file_path: str) -> None:
+        if should_ignore(file_path):
             return
-        logging.info(f"[WATCHDOG] File {event_type}: {filename}")
-        self.latest_events[filename] = event_type
+        relative_path = os.path.relpath(file_path, FILE_STORAGE_DIR)
+        logging.info(f"[WATCHDOG] {event_type.capitalize()}: {relative_path}")
+        self.latest_events[relative_path] = event_type
+        if relative_path in self.debounce_tasks:
+            self.debounce_tasks[relative_path].cancel()
+        self.debounce_tasks[relative_path] = self.loop.create_task(self._debounced_notify(relative_path))
 
-        if filename in self.debounce_tasks:
-            self.debounce_tasks[filename].cancel()
-
-        self.debounce_tasks[filename] = self.loop.create_task(self._debounced_notify(filename))
-
-    async def _debounced_notify(self, filename: str) -> None:
+    async def _debounced_notify(self, relative_path: str) -> None:
         try:
             await asyncio.sleep(self.debounce_interval)
-            event_type = self.latest_events.get(filename)
-            self.latest_events.pop(filename, None)
-            self.debounce_tasks.pop(filename, None) # Dont await this
-            await notify_clients(event_type, filename)
+            event_type = self.latest_events.pop(relative_path, None)
+            self.debounce_tasks.pop(relative_path, None)
+            if event_type:
+                await notify_clients(event_type, relative_path)
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logging.error(f"Error in debounced notify for '{filename}': {e}", exc_info=True)
+            logging.error(f"Error in debounced notify for '{relative_path}': {e}", exc_info=True)
 
     def on_created(self, event: FileSystemEvent) -> None:
-        if not event.is_directory:
-            self.enqueue_event("created", os.path.basename(event.src_path))
+        self.enqueue_event("created", event.src_path)
 
     def on_modified(self, event: FileSystemEvent) -> None:
-        if not event.is_directory:
-            self.enqueue_event("modified", os.path.basename(event.src_path))
+        self.enqueue_event("modified", event.src_path)
 
     def on_deleted(self, event: FileSystemEvent) -> None:
-        if not event.is_directory:
-            self.enqueue_event("deleted", os.path.basename(event.src_path))
+        self.enqueue_event("deleted", event.src_path)
 
     def on_moved(self, event: FileSystemEvent) -> None:
-        if not event.is_directory:
-            self.enqueue_event("deleted", os.path.basename(event.src_path))
-            self.enqueue_event("created", os.path.basename(event.dest_path))
+        self.enqueue_event("deleted", event.src_path)
+        self.enqueue_event("created", event.dest_path)
 
-
-def should_ignore(filename):
-    """Checks if the file should be ignored based on its suffixes or extension."""
-    return filename.startswith(IGNORED_PREFIXES) or filename.endswith(IGNORED_SUFFIXES)
 
 async def start_websocket_server():
-    """Starts the WebSocket server."""
     async with websockets.serve(websocket_handler, "0.0.0.0", 443, ssl=ssl_context):
         logging.info("WebSocket server started on wss://0.0.0.0:443")
-        await asyncio.Future()  # Keeps the server running
+        await asyncio.Future()
 
 
 def start_watchdog_observer(loop):
-    """Starts a file system observer to track file changes."""
     event_handler = AsyncSyncEventHandler(loop, debounce_interval=0.3)
     observer = Observer()
     observer.schedule(event_handler, FILE_STORAGE_DIR, recursive=True)
     observer.start()
-    logging.info(f"[WATCHDOG] File sync observer started, watching: {FILE_STORAGE_DIR}")
+    logging.info(f"[WATCHDOG] Observer started, watching: {FILE_STORAGE_DIR}")
     return observer
 
+
+ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ssl_context.load_cert_chain(SSL_CERT, SSL_KEY)
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()

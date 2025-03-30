@@ -429,7 +429,15 @@ class AsyncSyncEventHandler(FileSystemEventHandler):
 
 
 async def start_websocket_server():
-    async with websockets.serve(websocket_handler, "0.0.0.0", 443, ssl=ssl_context):
+    async with websockets.serve(
+            websocket_handler,
+            "0.0.0.0",
+            443,
+            ssl=ssl_context,
+            max_size=None,  # No limit on message size
+            ping_interval=30,
+            ping_timeout=30
+    ):
         logging.info("WebSocket server started on wss://0.0.0.0:443")
         await asyncio.Future()
 

@@ -131,7 +131,8 @@ async def websocket_handler(websocket: websockets.ServerConnection) -> None:
             if not persistent and data.get("subscribe") is True:
                 persistent = True
                 persistent_clients.add(websocket)
-                logging.info(f"Added {websocket.remote_address} as persistent notification connection.")
+                await send_sync_metadata(websocket)
+                logging.info(f"Added {websocket.remote_address} as persistent notification connection, syncing files.")
                 continue  # Do not process further messages on subscription.
 
             # Process file transfer commands:
@@ -145,6 +146,8 @@ async def websocket_handler(websocket: websockets.ServerConnection) -> None:
                 await list_files(websocket)
             elif command == "DELETE":
                 await delete_file(websocket, filename)
+            elif command == "SYNC":
+                await send_sync_metadata(websocket)
             elif data.get("event") is not None:
                 await handle_client_notification(data, websocket)
     except websockets.exceptions.ConnectionClosed:
@@ -236,16 +239,18 @@ async def notify_clients(event_type, filename):
     relative_filename = os.path.relpath(file_path, FILE_STORAGE_DIR)
     timestamp = int(os.path.getmtime(file_path)) if os.path.exists(file_path) else int(time.time())
     file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+    hash = get_cached_hash(file_path)
 
     message = json.dumps({
         "event": event_type,
         "filename": relative_filename,
         "timestamp": timestamp,
-        "size": file_size
+        "size": file_size,
+        "hash": hash
     })
 
     logging.info(
-        f"[NOTIFYING {len(persistent_clients)} CLIENTS] File '{relative_filename}' {event_type} at {timestamp} (size: {file_size} bytes)")
+        f"[NOTIFYING {len(persistent_clients)} CLIENTS] File '{relative_filename}' {event_type} at {timestamp} with size {file_size} bytes and hash {hash}")
     for client in list(persistent_clients):
         try:
             await client.send(message)
@@ -255,6 +260,27 @@ async def notify_clients(event_type, filename):
         except Exception as e:
             logging.error(f"Error sending notification: {e}", exc_info=True)
 
+
+# ----------------------- File Synchronisation -----------------------
+
+async def send_sync_metadata(websocket):
+    file_metadata_list = []
+    for root, _, filenames in os.walk(FILE_STORAGE_DIR):
+        for filename in filenames:
+            relative_path = os.path.relpath(os.path.join(root, filename), FILE_STORAGE_DIR)
+            if should_ignore(relative_path):
+                continue
+            abs_path = os.path.join(FILE_STORAGE_DIR, relative_path)
+            metadata = {
+                "filename": relative_path,
+                "timestamp": int(os.path.getmtime(abs_path)),
+                "size": os.path.getsize(abs_path),
+                "hash": get_cached_hash(abs_path)
+            }
+            file_metadata_list.append(metadata)
+
+    await websocket.send(json.dumps({"command": "SYNC_DATA", "files": file_metadata_list}))
+    logging.info(f"Sent sync metadata to client: {len(file_metadata_list)} files.")
 
 # ----------------------- File Reception and Transfer -----------------------
 

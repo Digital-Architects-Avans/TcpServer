@@ -435,8 +435,8 @@ async def start_websocket_server():
             443,
             ssl=ssl_context,
             max_size=None,  # No limit on message size
-            ping_interval=30,
-            ping_timeout=30
+            ping_interval=None  # disable automatic ping timeout
+
     ):
         logging.info("WebSocket server started on wss://0.0.0.0:443")
         await asyncio.Future()

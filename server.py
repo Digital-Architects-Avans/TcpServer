@@ -287,34 +287,68 @@ async def send_sync_metadata(websocket):
 async def receive_file(websocket, filename):
     file_path = os.path.normpath(os.path.join(FILE_STORAGE_DIR, filename))
     file_directory = os.path.dirname(file_path)
-    if not os.path.exists(file_directory):
-        os.makedirs(file_directory, exist_ok=True)
-
     temp_filename = filename + PARTIAL_SUFFIX
     temp_file_path = os.path.join(FILE_STORAGE_DIR, temp_filename)
-    logging.info(f"Receiving file: {filename} -> {file_path}")
+
+    logging.info(f"[UPLOAD] Start receiving file: {filename}")
+    logging.debug(f"[UPLOAD] Resolved path: {file_path}")
+    logging.debug(f"[UPLOAD] Temporary path: {temp_file_path}")
+
+    if not os.path.exists(file_directory):
+        os.makedirs(file_directory, exist_ok=True)
+        logging.debug(f"[UPLOAD] Created directory: {file_directory}")
+
+    chunk_count = 0
+    total_bytes_received = 0
+
     try:
         with open(temp_file_path, "wb") as f:
             while True:
-                chunk = await websocket.recv()
+                try:
+                    chunk = await websocket.recv()
+                except Exception as recv_error:
+                    logging.error(f"[UPLOAD] Error during recv(): {recv_error}")
+                    raise
+
                 if chunk == "EOF":
+                    logging.info(f"[UPLOAD] Received EOF after {chunk_count} chunks, {total_bytes_received} bytes")
                     break
+
                 f.write(chunk)
+                chunk_count += 1
+                total_bytes_received += len(chunk)
+
+        logging.info(f"[UPLOAD] Finished writing {chunk_count} chunks to temp file.")
+
         os.rename(temp_file_path, file_path)
-        logging.info(f"Converted '{temp_filename}' to '{filename}'")
+        logging.info(f"[UPLOAD] Renamed temp file to final: {file_path}")
+
         new_hash = compute_hash(file_path)
         if new_hash:
-            with open(get_hash_file_path(file_path), "w") as hf:
+            hash_path = get_hash_file_path(file_path)
+            with open(hash_path, "w") as hf:
                 hf.write(new_hash)
-            logging.info(f"Cached SHA256 hash for '{filename}'.")
-        logging.info(f"File {filename} uploaded successfully!")
+            logging.info(f"[UPLOAD] Cached SHA256 hash to: {hash_path} — {new_hash}")
+
+        file_size = os.path.getsize(file_path)
+        logging.info(f"[UPLOAD] File {filename} uploaded successfully. Size: {file_size} bytes")
+
         await asyncio.sleep(5)
+        logging.info(f"[UPLOAD] Notifying clients about new file: {filename}")
         await notify_clients("created", filename)
-        #await websocket.send(json.dumps({"status": "OK", "message": f"File {filename} uploaded"}))
+
+        # Optionally respond to client
+        # logging.info(f"[UPLOAD] Sending status OK response to client.")
+        # await websocket.send(json.dumps({"status": "OK", "message": f"File {filename} uploaded"}))
+
     except Exception as e:
-        logging.error(f"Error receiving file {filename}: {e}")
-        await websocket.send(json.dumps({"status": "ERROR", "message": "Upload failed"}))
+        logging.exception(f"[UPLOAD] Error receiving file {filename}: {e}")
+        try:
+            await websocket.send(json.dumps({"status": "ERROR", "message": "Upload failed"}))
+        except Exception as send_err:
+            logging.warning(f"[UPLOAD] Could not send error response to client: {send_err}")
     finally:
+        logging.debug(f"[UPLOAD] Running stale file cleanup.")
         start_stale_file_cleanup()
 
 

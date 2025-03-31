@@ -1,3 +1,2 @@
 watchdog==6.0.0
 websockets==15.0
-tqdm==4.62.3

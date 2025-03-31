@@ -10,7 +10,6 @@ import ssl
 import logging
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
-from tqdm import tqdm
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,6 +65,26 @@ def start_stale_file_cleanup():
 
 
 # ----------------------- Helper Methods -----------------------
+
+def log_progress(prefix: str, filename: str, transferred: int, total: int, last_bars: int, bar_total: int = 5) -> int:
+    """
+    Computes and logs an ASCII progress bar if progress has advanced by at least 20%.
+
+    :param prefix: A string prefix to indicate the action ("Sending" or "Receiving").
+    :param filename: The name of the file.
+    :param transferred: Number of bytes transferred so far.
+    :param total: Total number of bytes expected.
+    :param last_bars: The previous number of bars logged.
+    :param bar_total: Total number of bars for 100% progress.
+    :return: The updated last_bars value.
+    """
+    percent = int((transferred / total) * 100)
+    bars = percent // 20
+    if bars > last_bars:
+        progress_bar = "[" + "#" * bars + "-" * (bar_total - bars) + f"] {percent}%"
+        logging.info(f"{prefix} {filename}: {progress_bar}")
+        return bars
+    return last_bars
 
 def compute_hash(file_path):
     hasher = hashlib.sha256()
@@ -296,13 +315,9 @@ async def receive_file(websocket, filename, expected_size=None):
     if not os.path.exists(file_directory):
         os.makedirs(file_directory, exist_ok=True)
 
-    chunk_count = 0
-    total_bytes_received = 0
-
-    # Initialize progress bar using the expected file size.
-    progress_bar = tqdm(total=expected_size, unit="B", unit_scale=True,
-                        desc=f"Receiving {filename}") if expected_size else tqdm(unit="B", unit_scale=True,
-                        desc=f"Receiving {filename}")
+    total_received = 0
+    last_bars = 0
+    bar_total = 5
 
     try:
         with open(temp_file_path, "wb") as f:
@@ -316,19 +331,16 @@ async def receive_file(websocket, filename, expected_size=None):
                     logging.error(f"[UPLOAD] Error during recv(): {recv_error}")
                     raise
 
-                # Check for EOF marker sent as a text message.
                 if isinstance(chunk, str) and chunk == "EOF":
-                    logging.info(f"[UPLOAD] Received EOF after {chunk_count} chunks, {total_bytes_received} bytes")
+                    logging.info(f"[UPLOAD] Received EOF after {total_received} bytes")
                     break
 
                 f.write(chunk)
-                chunk_count += 1
-                total_bytes_received += len(chunk)
-                progress_bar.update(len(chunk))
-        progress_bar.close()
+                total_received += len(chunk)
+                if expected_size:
+                    last_bars = log_progress("Receiving", filename, total_received, expected_size, last_bars, bar_total)
         os.rename(temp_file_path, file_path)
         logging.info(f"[UPLOAD] File {filename} uploaded successfully.")
-
     except Exception as e:
         logging.exception(f"[UPLOAD] Error receiving file {filename}: {e}")
         try:
@@ -336,7 +348,6 @@ async def receive_file(websocket, filename, expected_size=None):
         except Exception as send_err:
             logging.warning(f"[UPLOAD] Could not send error response: {send_err}")
     finally:
-        # Optionally, trigger stale file cleanup.
         start_stale_file_cleanup()
 
 
@@ -347,7 +358,6 @@ async def send_file(websocket, filename):
         return
 
     file_size = os.path.getsize(file_path)
-    # Respond with a JSON message using the download command that includes fileSize.
     download_info = {
         "command": "DOWNLOAD",
         "filename": filename,
@@ -356,15 +366,19 @@ async def send_file(websocket, filename):
     await websocket.send(json.dumps(download_info))
     logging.info(f"Sending file: {filename} (size: {file_size} bytes)")
 
+    total_sent = 0
+    last_bars = 0
+    bar_total = 5
+
     try:
-        with open(file_path, "rb") as f, tqdm(total=file_size, unit="B", unit_scale=True, desc=f"Sending {filename}") as progress_bar:
+        with open(file_path, "rb") as f:
             while True:
                 chunk = f.read(4096)
                 if not chunk:
                     break
                 await websocket.send(chunk)
-                progress_bar.update(len(chunk))
-        # Send EOF marker to indicate completion.
+                total_sent += len(chunk)
+                last_bars = log_progress("Sending", filename, total_sent, file_size, last_bars, bar_total)
         await websocket.send("EOF")
         logging.info(f"File {filename} sent successfully!")
     except Exception as e:

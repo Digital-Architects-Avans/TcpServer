@@ -306,14 +306,20 @@ async def receive_file(websocket, filename):
             while True:
                 try:
                     chunk = await websocket.recv()
+                except websockets.exceptions.ConnectionClosedOK:
+                    # Normal closure: break out of the loop gracefully.
+                    logging.info(f"[UPLOAD] WebSocket closed normally during upload.")
+                    break
                 except Exception as recv_error:
                     logging.error(f"[UPLOAD] Error during recv(): {recv_error}")
                     raise
 
-                if chunk == "EOF":
+                # If the chunk is a text message and equals "EOF", end the loop.
+                if isinstance(chunk, str) and chunk == "EOF":
                     logging.info(f"[UPLOAD] Received EOF after {chunk_count} chunks, {total_bytes_received} bytes")
                     break
 
+                # Otherwise, write the binary chunk to file.
                 f.write(chunk)
                 chunk_count += 1
                 total_bytes_received += len(chunk)

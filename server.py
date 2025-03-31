@@ -359,7 +359,6 @@ async def send_file(websocket, filename):
 
     file_size = os.path.getsize(file_path)
     download_info = {
-        "command": "DOWNLOAD",
         "filename": filename,
         "fileSize": file_size
     }

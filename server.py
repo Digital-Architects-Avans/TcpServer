@@ -10,7 +10,7 @@ import ssl
 import logging
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
-from tqdm import tqdm  # pip install tqdm
+from tqdm import tqdm
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

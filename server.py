@@ -10,6 +10,8 @@ import ssl
 import logging
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
+from tqdm import tqdm  # pip install tqdm
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -284,22 +286,23 @@ async def send_sync_metadata(websocket):
 
 # ----------------------- File Reception and Transfer -----------------------
 
-async def receive_file(websocket, filename):
+async def receive_file(websocket, filename, expected_size=None):
     file_path = os.path.normpath(os.path.join(FILE_STORAGE_DIR, filename))
     file_directory = os.path.dirname(file_path)
     temp_filename = filename + PARTIAL_SUFFIX
     temp_file_path = os.path.join(FILE_STORAGE_DIR, temp_filename)
 
     logging.info(f"[UPLOAD] Start receiving file: {filename}")
-    logging.debug(f"[UPLOAD] Resolved path: {file_path}")
-    logging.debug(f"[UPLOAD] Temporary path: {temp_file_path}")
-
     if not os.path.exists(file_directory):
         os.makedirs(file_directory, exist_ok=True)
-        logging.debug(f"[UPLOAD] Created directory: {file_directory}")
 
     chunk_count = 0
     total_bytes_received = 0
+
+    # Initialize progress bar using the expected file size.
+    progress_bar = tqdm(total=expected_size, unit="B", unit_scale=True,
+                        desc=f"Receiving {filename}") if expected_size else tqdm(unit="B", unit_scale=True,
+                        desc=f"Receiving {filename}")
 
     try:
         with open(temp_file_path, "wb") as f:
@@ -307,54 +310,33 @@ async def receive_file(websocket, filename):
                 try:
                     chunk = await websocket.recv()
                 except websockets.exceptions.ConnectionClosedOK:
-                    # Normal closure: break out of the loop gracefully.
-                    logging.info(f"[UPLOAD] WebSocket closed normally during upload.")
+                    logging.info("[UPLOAD] WebSocket closed normally during upload.")
                     break
                 except Exception as recv_error:
                     logging.error(f"[UPLOAD] Error during recv(): {recv_error}")
                     raise
 
-                # If the chunk is a text message and equals "EOF", end the loop.
+                # Check for EOF marker sent as a text message.
                 if isinstance(chunk, str) and chunk == "EOF":
                     logging.info(f"[UPLOAD] Received EOF after {chunk_count} chunks, {total_bytes_received} bytes")
                     break
 
-                # Otherwise, write the binary chunk to file.
                 f.write(chunk)
                 chunk_count += 1
                 total_bytes_received += len(chunk)
-
-        logging.info(f"[UPLOAD] Finished writing {chunk_count} chunks to temp file.")
-
+                progress_bar.update(len(chunk))
+        progress_bar.close()
         os.rename(temp_file_path, file_path)
-        logging.info(f"[UPLOAD] Renamed temp file to final: {file_path}")
-
-        new_hash = compute_hash(file_path)
-        if new_hash:
-            hash_path = get_hash_file_path(file_path)
-            with open(hash_path, "w") as hf:
-                hf.write(new_hash)
-            logging.info(f"[UPLOAD] Cached SHA256 hash to: {hash_path} — {new_hash}")
-
-        file_size = os.path.getsize(file_path)
-        logging.info(f"[UPLOAD] File {filename} uploaded successfully. Size: {file_size} bytes")
-
-        await asyncio.sleep(5)
-        logging.info(f"[UPLOAD] Notifying clients about new file: {filename}")
-        await notify_clients("created", filename)
-
-        # Optionally respond to client
-        # logging.info(f"[UPLOAD] Sending status OK response to client.")
-        # await websocket.send(json.dumps({"status": "OK", "message": f"File {filename} uploaded"}))
+        logging.info(f"[UPLOAD] File {filename} uploaded successfully.")
 
     except Exception as e:
         logging.exception(f"[UPLOAD] Error receiving file {filename}: {e}")
         try:
             await websocket.send(json.dumps({"status": "ERROR", "message": "Upload failed"}))
         except Exception as send_err:
-            logging.warning(f"[UPLOAD] Could not send error response to client: {send_err}")
+            logging.warning(f"[UPLOAD] Could not send error response: {send_err}")
     finally:
-        logging.debug(f"[UPLOAD] Running stale file cleanup.")
+        # Optionally, trigger stale file cleanup.
         start_stale_file_cleanup()
 
 
@@ -363,11 +345,26 @@ async def send_file(websocket, filename):
     if not os.path.exists(file_path):
         await websocket.send(json.dumps({"status": "ERROR", "message": "File not found"}))
         return
-    logging.info(f"Sending file: {filename}")
+
+    file_size = os.path.getsize(file_path)
+    # Respond with a JSON message using the download command that includes fileSize.
+    download_info = {
+        "command": "DOWNLOAD",
+        "filename": filename,
+        "fileSize": file_size
+    }
+    await websocket.send(json.dumps(download_info))
+    logging.info(f"Sending file: {filename} (size: {file_size} bytes)")
+
     try:
-        with open(file_path, "rb") as f:
-            while chunk := f.read(4096):
+        with open(file_path, "rb") as f, tqdm(total=file_size, unit="B", unit_scale=True, desc=f"Sending {filename}") as progress_bar:
+            while True:
+                chunk = f.read(4096)
+                if not chunk:
+                    break
                 await websocket.send(chunk)
+                progress_bar.update(len(chunk))
+        # Send EOF marker to indicate completion.
         await websocket.send("EOF")
         logging.info(f"File {filename} sent successfully!")
     except Exception as e:

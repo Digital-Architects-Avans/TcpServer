@@ -310,7 +310,7 @@ async def receive_file(websocket, filename):
         logging.info(f"File {filename} uploaded successfully!")
         await asyncio.sleep(5)
         await notify_clients("created", filename)
-        await websocket.send(json.dumps({"status": "OK", "message": f"File {filename} uploaded"}))
+        #await websocket.send(json.dumps({"status": "OK", "message": f"File {filename} uploaded"}))
     except Exception as e:
         logging.error(f"Error receiving file {filename}: {e}")
         await websocket.send(json.dumps({"status": "ERROR", "message": "Upload failed"}))
